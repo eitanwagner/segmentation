@@ -35,124 +35,106 @@ def count_topics():
     with open('common_topics500.json', 'w') as outfile:
         json.dump(common_topics, outfile)
 
-def parse1():
-    with open('words2topics.json', 'r') as infile:
+def parse_from_xml(data_path):
+    with open(data_path + 'words2topics-new.json', 'r') as infile:
         words2topics = json.load(infile)
-    with open('common_topics500.json', 'r') as infile:
-        new_topics = list(json.load(infile).keys())
+
     from datetime import time
 
-    topic2num = pd.read_csv('topic2num.csv', header=None, index_col=0, squeeze=True).to_dict()
-    num2newtopic = pd.read_csv('num2newtopic.csv', header=None, index_col=0, squeeze=True).to_dict()
-    new_words2topics = {w: num2newtopic.get(topic2num.get(t, None), None) for w, t in words2topics.items()}
-
-    data = pd.read_csv("Martha_transcripts/index segments for 1000 English Jewish survivor interviews.csv")
-    # print(data.head())
-
+    data = pd.read_csv(data_path + "Martha_transcripts/index segments for 1000 English Jewish survivor interviews.csv")
     testimonies = set(data['IntCode'])
     topics = [str(d).split("; ") for d in data['IndexedTermLabels']]
-    print(len(topics))
-
-    distinct_topics = set([t for topic in topics for t in topic])
-    print(len(distinct_topics))
-    with open('distinct_topics.json', 'w+') as f:
-        json.dump(list(distinct_topics), f)
 
     segments = {}
-    wrong_len = []
     bad_t = 0
-    not_round = 0
-    last_i = 0
-    # time_list = []
-    for _, t in enumerate(testimonies):
-        t_data = data[data['IntCode'] == t]
+    bad_ts = set()
+
+    # clean testimony list
+    for i, t in enumerate(testimonies):
+        t_data = data[data['IntCode'] == t]  # data for the specific testimony
         num_tapes = max(t_data['InTapenumber'])
-        if sum((t_data['InTapenumber'] != t_data['OutTapenumber']).array) > 0:
-            wrong_len.append(t)
-            not_round += 1
-            continue
+        segments[t] = num_tapes  # this is temporary and will be overwritten
+
+        if sum((t_data['InTapenumber'] != t_data['OutTapenumber']).array) > 0:  # a segment goes between tapes
+            testimonies.remove(t)
         else:
             times = [time.fromisoformat(tm+'0') for tm in t_data['InTimeCode']]
-            time_list = [tm for tm in times if tm.second == 0]
+            time_list = [tm for tm in times if tm.second == 0]  # round times
             if len(time_list) != len(times):
-                # wrong_len.append(t)
-                not_round += 1
-                continue
+                testimonies.remove(t)
+
             tape_starts = [tm for tm in times if tm.second == 0 and tm.minute == 0]
-            if len(tape_starts) != num_tapes:
-                # wrong_len.append(t)
-                continue
+            if len(tape_starts) != num_tapes:  # no first segment
+                testimonies.remove(t)
 
-
-        segments[t] = []
-        for i in range(1, 20):
+    for i, t in enumerate(testimonies):
+        t_data = data[data['IntCode'] == t]  # data for the specific testimony
+        num_tapes = segments[t]
+        segments[t] = []  # list of segments for this testimony
+        for i in range(1, num_tapes):
             segments_i = 0
             t_i_data = t_data[t_data['InTapenumber'] == i]
             try:
-                # mytree = ET.parse(f'Martha_transcripts/{t}.{i}.xml')
-                mytree = ET.parse(f'Martha_transcripts/{t}.{i}.xml')
+                mytree = ET.parse(data_path + f'Martha_transcripts/{t}.{i}.xml')
                 last_i = i
             except (FileNotFoundError, ParseError) as err:
                 # except:
                 if str(err)[:9] != "[Errno 2]":
-                    with open(f'Martha_transcripts/{t}.{i}.xml', 'r', encoding='utf-8') as f:
+                    with open(data_path + f'Martha_transcripts/{t}.{i}.xml', 'r', encoding='utf-8') as f:
                         s = f.read().replace("&", " and ")
-                    with open(f'Martha_transcripts/{t}.{i}.xml', 'w', encoding='utf-8') as f:
+                    with open(data_path + f'Martha_transcripts/{t}.{i}.xml', 'w', encoding='utf-8') as f:
                         f.write(s)
                     print(err)
                     print(t, i)
                 continue
             else:
                 myroot = mytree.getroot()
-                prev_t = 0
+                prev_time = 0
                 words = []
                 for r in myroot:
                     for e in r:
-                        if prev_t // 60000 == int(e.attrib['m']) // 60000:
+                        if prev_time // 60000 == int(e.attrib['m']) // 60000:
                             if e.text is not None:
                                 words.append(e.text)
-                        else:
-                            if len(t_data) <= len(segments[t]):
-                                terms = "nan"
+                        else:  # next segment
+                            if len(t_data) <= len(segments[t]):  # reached the end
+                                terms = "nan"  # !!!  ???
+                                bad_ts.add(t)
                             else:
                                 terms = str(list(t_data['IndexedTermLabels'])[len(segments[t])])
-                            # if math.isnan(terms):
-                            #     terms = None
-                            # else:
-                            # terms = [words2topics.get(t, None) for t in terms.split('; ') if words2topics.get(t, None) in new_topics]
-                            terms = [new_words2topics.get(t, None) for t in terms.split('; ') if new_words2topics.get(t, None) is not None]
-                            bin_token = "BIN_" + str((10 * len(segments[t])) // len(t_data))
-                            segments[t].append([words + [bin_token], terms])
+                                # add some NULLs!!!
+
+                            terms = [words2topics.get(t, None) for t in terms.split('; ') if words2topics.get(t, None) is not None]  # recognized terms
+                            bin = str((10 * len(segments[t])) // len(t_data))
+                            segments[t].append({'text': ' '.join(words), 'bin': bin, 'terms': terms})
                             segments_i += 1
                             if e.text is not None:
                                 words = [e.text]
                             else:
-                                words =[]
-                        prev_t = int(e.attrib['m'])
-                if len(words) > 0:
+                                words = []
+                        prev_time = int(e.attrib['m'])
+                if len(words) > 0:  # words in the last segment
                     if len(t_data) <= len(segments[t]):
-                        terms = "nan"
+                        terms = "nan"  # this means we have a problem!!
+                        bad_ts.add(t)
                     else:
                         terms = str(list(t_data['IndexedTermLabels'])[len(segments[t])])
-                    # terms = [words2topics.get(t, None) for t in terms.split('; ') if words2topics.get(t, None) is not None]
-                    terms = [new_words2topics.get(t, None) for t in terms.split('; ') if new_words2topics.get(t, None) is not None]
-                    segments[t].append([words, terms])
-                    # segments[t].append(list(words))
+                    terms = [words2topics.get(t, None) for t in terms.split('; ') if words2topics.get(t, None) is not None]  # recognized terms
+                    bin = str((10 * len(segments[t])) // len(t_data))
+                    segments[t].append({'text': ' '.join(words), 'bin': bin, 'terms': terms})
                     segments_i += 1
                     words = []
                 while segments_i < len(t_i_data):
-                    segments[t].append([[], []])
+                    segments[t].append({})
                     segments_i += 1
-        if len(segments[t]) != len(t_data):
+        if len(segments[t]) != len(t_data) or t in bad_ts:
             bad_t += 1
             segments.pop(t)
 
-    title_w_segments = [[seg[1][0], ' '.join(seg[0])] for t, s in segments.items() for seg in s if len(seg[1]) == 1]
-    with open('sf_title_w_segments1.json', 'w') as outfile:
-        json.dump(title_w_segments, outfile)
+    # title_w_segments = [[seg[1][0], ' '.join(seg[0])] for t, s in segments.items() for seg in s if len(seg[1]) == 1]
+    with open(data_path + 'sf_segments.json', 'w') as outfile:
+        json.dump(segments, outfile)
 
-    # print(len(wrong_len))
-    # print("All segments: ", sum([len(segment) for segment in segments.values()]))
     print("done")
 
 
@@ -198,7 +180,8 @@ def parse2():
 
 
 if __name__ == "__main__":
-    parse1()
+    data_path = '/cs/snapless/oabend/eitan.wagner/segmentation/data/'
+    parse_from_xml(data_path)
     # count_topics()
 
 # different format - 19895, 20218, 20367, 20405, 20505, 20873, 20909 etc.

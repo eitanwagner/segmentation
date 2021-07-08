@@ -27,13 +27,14 @@ class TextcatSVM:
         self.vectorizer = joblib.load(vectorizer_path)
 
     def fit(self, data_path=None):
-        dataset = TextcatDataset(path)
+        dataset = TextcatDataset(data_path)
         self.vectorizer = dataset.vectorizer
         self.model= train_svm(dataset, random_state=42)
 
-    def predict(self, text):
-        x = self.vectorizer.transform(self.x).toarray()
-        self.model.predict_proba(text)
+    def predict(self, span):
+        # returns probabilities for a Span
+        x = self.vectorizer.transform(span[0])
+        return self.model.predict_proba(x)
 
 
 class Vectorizer:
@@ -106,7 +107,7 @@ def train_svm(dataset, random_state=42, out_path=None):
 
     from sklearn import svm
     #Create a svm Classifier
-    clf = svm.SVC(kernel='rbf', probability=True, gamma='scale')
+    clf = svm.SVC(kernel='rbf', probability=True, gamma='scale', class_weight='balanced')
     #Train the model using the traini]
     # ng sets
     print("Training SVM")
@@ -147,8 +148,8 @@ def test_model(model, dataset, random_state=42):
     for i, p in enumerate(preds):
         eval_conf[y_labels_eval[i]][p] += 1
 
-    train_conf.to_csv(f"train_conf_svm.csv")
-    eval_conf.to_csv(f"eval_conf_svm.csv")
+    train_conf.to_csv(f"models/train_conf_svm.csv")
+    eval_conf.to_csv(f"models/eval_conf_svm.csv")
 
 
 if __name__ == "__main__":
@@ -156,7 +157,7 @@ if __name__ == "__main__":
     # path = 'sf_title_w_segments1.json'
     path = '/cs/snapless/oabend/eitan.wagner/segmentation/data/sf_title_w_segments1.json'
     dataset = TextcatDataset(path)
-    model = train_svm(dataset, random_state=42)
+    model = train_svm(dataset, random_state=42, out_path='/cs/snapless/oabend/eitan.wagner/segmentation/models/')
     # now you can save it to a file
-    # model = joblib.load('svm.pkl')
+    # model = joblib.load('/cs/snapless/oabend/eitan.wagner/segmentation/models/svm.pkl')
     test_model(model, dataset, random_state=42)
