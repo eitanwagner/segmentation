@@ -125,7 +125,7 @@ def train_svm(dataset, random_state=42, out_path=None):
     return clf
 
 
-def test_model(model, dataset, random_state=42):
+def test_model(model, dataset, random_state=42, out_path=None):
     X_train, X_test, y_train, y_test = dataset.get_splits(0.2, random_state=random_state)
     labels = dataset.encoder.classes_
     import pandas as pd
@@ -148,8 +148,9 @@ def test_model(model, dataset, random_state=42):
     for i, p in enumerate(preds):
         eval_conf[y_labels_eval[i]][p] += 1
 
-    train_conf.to_csv(f"models/train_conf_svm.csv")
-    eval_conf.to_csv(f"models/eval_conf_svm.csv")
+    if out_path:
+        train_conf.to_csv(out_path + f"models/train_conf_svm.csv")
+        eval_conf.to_csv(out_path + f"models/eval_conf_svm.csv")
 
 
 if __name__ == "__main__":
@@ -157,7 +158,7 @@ if __name__ == "__main__":
     # path = 'sf_title_w_segments1.json'
     path = '/cs/snapless/oabend/eitan.wagner/segmentation/data/sf_title_w_segments1.json'
     dataset = TextcatDataset(path)
-    model = train_svm(dataset, random_state=42, out_path='/cs/snapless/oabend/eitan.wagner/segmentation/models/')
+    # model = train_svm(dataset, random_state=42, out_path='/cs/snapless/oabend/eitan.wagner/segmentation/models/')
     # now you can save it to a file
-    # model = joblib.load('/cs/snapless/oabend/eitan.wagner/segmentation/models/svm.pkl')
-    test_model(model, dataset, random_state=42)
+    model = joblib.load('/cs/snapless/oabend/eitan.wagner/segmentation/models/svm.pkl')
+    test_model(model, dataset, random_state=42, out_path='/cs/snapless/oabend/eitan.wagner/segmentation/models/')
