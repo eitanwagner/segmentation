@@ -1,42 +1,84 @@
-# pytorch mlp for multiclass classification
 from numpy import vstack
 from numpy import argmax
 import numpy as np
+from scipy.sparse import csr_matrix
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import accuracy_score
-from torch import Tensor
-from torch.utils.data import Dataset
-from torch.utils.data import random_split
 
 import json
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.model_selection import train_test_split
+# from sklearn.externals import joblib
+import joblib
+
 from tqdm import tqdm
 
 import spacy
-nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
+# nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
+
+
+class TextcatSVM:
+    def __init__(self):
+        self.model = None
+        self.vectorizer = None
+
+    def from_path(self, model_path='svm.pkl', vectorizer_path='tfidf.pkl'):
+        self.model = joblib.load(model_path)
+        self.vectorizer = joblib.load(vectorizer_path)
+
+    def fit(self, data_path=None):
+        dataset = TextcatDataset(path)
+        self.vectorizer = dataset.vectorizer
+        self.model= train_svm(dataset, random_state=42)
+
+    def predict(self, text):
+        x = self.vectorizer.transform(self.x).toarray()
+        self.model.predict_proba(text)
+
+
+class Vectorizer:
+    # creates vectors for texts
+    # the text should be spaCy Spans
+    def __init__(self):
+        self.tfidf = TfidfVectorizer()
+
+    def fit_transform(self, spans):
+        texts = [s.text for s in spans]
+        X = self.tfidf.fit_transform(texts)
+        # here we add features
+        return X
+
+    def transform(self, spans):
+        texts = [s.text for s in spans]
+        X = self.tfidf.transform(texts)
+        # here we add features
+        return X
+
 
 # dataset definition
-class TextcatDataset(Dataset):
-    # load the dataset
-    def __init__(self, path, tfidf=True, sparse=True):
+class TextcatDataset:
+    # hold the dataset and performs transforming and splitting
+    def __init__(self, path):
         # load the data
         with open(path, 'r') as infile:
             data = json.load(infile)
 
+        np.random.shuffle(data)
         # store the inputs and outputs
         self.y, self.X = list(zip(*data))
-        if tfidf:
-            vectorizer = TfidfVectorizer()
-            self.X = vectorizer.fit_transform(self.X).toarray()
-        # ensure input data is floats
-        if sparse:
-            from scipy.sparse import csr_matrix
-            self.X = csr_matrix(self.X, dtype=np.float32)
-        else:
-            self.X = self.X.astype('float32')
+        self.vectorizer = TfidfVectorizer()
+        self.X = self.vectorizer.fit_transform(self.X)
+        self.X = csr_matrix(self.X, dtype=np.float32)
+
         # label encode target and ensure the values are floats
         self.encoder = LabelEncoder().fit(self.y)
         self.y = self.encoder.transform(self.y)
+
+        self.X_train = self.X[:int(0.8*self.X.shape[0]), :]
+        self.X_test = self.X[int(0.8*self.X.shape[0]):, :]
+        self.y_train = self.y[:int(0.8*len(self.y))]
+        self.y_test = self.y[int(0.8*len(self.y)):]
+
         self.dim = self.X.shape[1]
 
     # number of rows in the dataset
@@ -48,76 +90,42 @@ class TextcatDataset(Dataset):
         return [self.X[idx], self.y[idx]]
 
     # get indexes for train and test rows
-    def get_splits(self, n_test=0.2):
-        # determine sizes
-        test_size = round(n_test * self.X.shape[0])
-        train_size = self.X.shape[0] - test_size
-        # calculate the split
-        return random_split(self, [train_size, test_size])
+    def get_splits(self, n_test=0.2, random_state=42):
+        # X_train, X_test, y_train, y_test = train_test_split(self.X, self.y, test_size=0.2, random_state=random_state)
+        # return X_train, X_test, y_train, y_test
+        return self.X_train, self.X_test, self.y_train, self.y_test
+
+    def id2lables(self, y):
+        # converts a response vector back to the original label strings
+        return self.encoder.inverse_transform(self.y)
 
 
-def with_svm(path, only_data=False):
-    # load the dataset
-    dataset = TextcatDataset(path, tfidf=True)
-    # calculate split
-    X, y = dataset.X, dataset.y
-    X_train = X[:int(0.8*X.shape[0]), :]
-    X_test = X[int(0.8*X.shape[0]):, :]
-    y_train = y[:int(0.8*len(y))]
-    y_test = y[int(0.8*len(y)):]
-    z = list(zip(X_train, y_train))
-    np.random.shuffle(z)
-    X_train, y_train = list(zip(*z))
-    from scipy.sparse import vstack
-    X_train = vstack(X_train)
-    if only_data:
-        return (dataset, X_train, y_train, X_test, y_test)
-    # from scipy.sparse import csr_matrix
-    # # X_train = csr_matrix(np.array(X_train))
-    # X_train = csr_matrix(X_train)
-    #Import svm model
+def train_svm(dataset, random_state=42, out_path=None):
+    # trains an SVM model on the given dataset
+    X_train, X_test, y_train, y_test = dataset.get_splits(0.2, random_state=random_state)
+
     from sklearn import svm
     #Create a svm Classifier
-    clf = svm.SVC(kernel='rbf', probability=True)
-    #Train the model using the training sets
+    clf = svm.SVC(kernel='rbf', probability=True, gamma='scale')
+    #Train the model using the traini]
+    # ng sets
     print("Training SVM")
     clf.fit(X_train, y_train)
+
     #Predict the response for test dataset
     y_pred = clf.predict(X_test)
     #Import scikit-learn metrics module for accuracy calculation
-    from sklearn import metrics
     # Model Accuracy: how often is the classifier correct?
-    print("SVM Accuracy:", metrics.accuracy_score(y_test, y_pred))
-    from sklearn.externals import joblib
+    print("SVM Accuracy:", accuracy_score(y_test, y_pred))
     # now you can save it to a file
-    joblib.dump(clf, 'svm.pkl')
-    return clf, (dataset, X_train, y_train, X_test, y_test)
+    if out_path:
+        joblib.dump(clf, out_path + 'svm.pkl')
+        joblib.dump(dataset.vectorizer, out_path + 'tfidf.pkl')
+    return clf
 
-# evaluate the model
-def evaluate_model(model):
-    predictions, actuals = list(), list()
-    model.eval()
-    for i, (inputs, targets) in enumerate(test_dl):
-        # evaluate the model on the test set
-        yhat = model(inputs)
-        # retrieve numpy array
-        yhat = yhat.detach().numpy()
-        actual = targets.numpy()
-        # convert to class labels
-        yhat = argmax(yhat, axis=1)
-        # reshape for stacking
-        actual = actual.reshape((len(actual), 1))
-        yhat = yhat.reshape((len(yhat), 1))
-        # store
-        predictions.append(yhat)
-        actuals.append(actual)
-    predictions, actuals = vstack(predictions), vstack(actuals)
-    # calculate accuracy
-    acc = accuracy_score(actuals, predictions)
-    return acc
 
-def test_model(model, data):
-    dataset, X_train, y_train, X_test, y_test = data
+def test_model(model, dataset, random_state=42):
+    X_train, X_test, y_train, y_test = dataset.get_splits(0.2, random_state=random_state)
     labels = dataset.encoder.classes_
     import pandas as pd
 
@@ -143,26 +151,12 @@ def test_model(model, data):
     eval_conf.to_csv(f"eval_conf_svm.csv")
 
 
-# make a class prediction for one row of data
-def predict(row, model):
-    # convert row to data
-    row = Tensor([row])
-    # make prediction
-    yhat = model(row)
-    # retrieve numpy array
-    yhat = yhat.detach().numpy()
-    return yhat
-
-
-# prepare the data
-path = 'sf_title_w_segments1.json'
-# path = '/cs/snapless/oabend/eitan.wagner/TM_clustering/title_w_segments.json'
-# model, data = with_svm(path)
-data = with_svm(path, only_data=True)
-from sklearn.externals import joblib
-# now you can save it to a file
-model = joblib.load('svm.pkl')
-test_model(model, data)
-
-
-
+if __name__ == "__main__":
+    # prepare the data
+    # path = 'sf_title_w_segments1.json'
+    path = '/cs/snapless/oabend/eitan.wagner/segmentation/data/sf_title_w_segments1.json'
+    dataset = TextcatDataset(path)
+    model = train_svm(dataset, random_state=42)
+    # now you can save it to a file
+    # model = joblib.load('svm.pkl')
+    test_model(model, dataset, random_state=42)
