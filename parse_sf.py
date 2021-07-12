@@ -4,6 +4,8 @@ import json
 import xml.etree.ElementTree as ET
 from xml.etree.ElementTree import ParseError
 
+from segment_srl import Referencer, SRLer
+
 import pandas as pd
 import numpy as np
 import spacy
@@ -157,105 +159,109 @@ def parse_from_xml(data_path):
 # **************************
 # add additional properties
 
-def get_pipe(doc, name):
-    i = doc.pipe_name.index(name)
-    return doc.pipline(i)[1]  # the component without the name
 
-def get_char_spans(segments):
-    # returns spact spans (for segemnts) given a list of segment texts
-    lens = [len(segment)+1 for segment in segments]
-    lens[-1] = lens[-1] - 1  # last segment has not extra space
-    end_chars = np.cumsum(lens)  # end not included
-    start_chars = np.zeros(len(segments), dtype=int)
-    start_chars[1:] = end_chars[:-1] + 1  # to skip the extra space
-    char_spans = list(zip(start_chars, end_chars))
-    return char_spans
+# TODO: make into an object
+class TestimonyParser:
+    def __init__(self, nlp):
+        self.referencer, self.srler = Referencer(nlp), SRLer(nlp)
+        self.nlp = nlp
+        print("Made testimony parser")
 
-def make_features(segment, i):
-    # make ent features
-    doc = segment.doc
-    ner = get_pipe(doc, "ner")
-    labels = ner.lables
-    ent_counts = np.zeros(len(labels))
-    for ent in segment.ents:
-        ent_counts[labels.index(ent.label_)] += 1
 
-    # make srl features
-    verbs = (v for v in nlp.vocab if v.pos_ == "VERB")
-    verb_counts, arg0_counts, arg1_counts = np.zeros(len(verbs)), np.zeros(50), np.zeros(50)
-    for srl in segment._.srls:
-        if srl._.verb and srl._.verb._.verb_id:  # this should always be true
-            verb_counts[srl._.verb._.verb_id] += 1
-        if srl._.arg0 and srl._.arg0._.arg0_id:
-            arg0_counts[srl._.arg0._.arg0_id] += 1
-        if srl._.arg1 and srl._.arg1._.arg1_id:
-            arg1_counts[srl._.arg1._.arg1_id] += 1
+    def get_pipe(self, name):
+        i = self.nlp.pipe_names.index(name)
+        return self.nlp.pipline(i)[1]  # the component without the name
 
-    bin = np.array(10 * i // len(doc.spans["segments"]))
-    return np.concatenate((ent_counts, verb_counts, arg0_counts, arg1_counts, bin), axis=None)
+    def get_char_spans(self, segments):
+        # returns spact spans (for segemnts) given a list of segment texts
+        lens = [len(segment)+1 for segment in segments]
+        lens[-1] = lens[-1] - 1  # last segment has not extra space
+        end_chars = np.cumsum(lens)  # end not included
+        start_chars = np.zeros(len(segments), dtype=int)
+        start_chars[1:] = end_chars[:-1] + 1  # to skip the extra space
+        char_spans = list(zip(start_chars, end_chars))
+        return char_spans
 
-def parse_testimony(nlp, text):
-    from segment_srl import Referencer, SRLer
-    referencer, srler = Referencer(), SRLer()
+    def make_features(self, segment, i):
+        # make ent features
+        doc = segment.doc
+        ner = self.get_pipe("ner")
+        labels = ner.lables
+        ent_counts = np.zeros(len(labels))
+        for ent in segment.ents:
+            ent_counts[labels.index(ent.label_)] += 1
 
-    doc = nlp(text)
-    # do coreference resolution
-    referencer.add_to_Doc(referencer.get_cr(doc.text))
-    return doc
+        # make srl features
+        verbs = self.srler.verbs
+        verb_counts, arg0_counts, arg1_counts = np.zeros(len(verbs)), np.zeros(50), np.zeros(50)
+        for srl in segment._.srls:
+            if srl._.verb and srl._.verb._.verb_id:  # this should always be true
+                verb_counts[srl._.verb._.verb_id] += 1
+            if srl._.arg0 and srl._.arg0._.arg0_id:
+                arg0_counts[srl._.arg0._.arg0_id] += 1
+            if srl._.arg1 and srl._.arg1._.arg1_id:
+                arg1_counts[srl._.arg1._.arg1_id] += 1
 
-def parse_from_segments(nlp, texts, labels=None):
-    # gets texts for one testimony and returns them as a spacy span with additional attributes
-    from segment_srl import Referencer, SRLer
-    referencer, srler = Referencer(), SRLer()  # this is wasteful
+        bin = np.array(10 * i // len(doc.spans["segments"]))
+        return np.concatenate((ent_counts, verb_counts, arg0_counts, arg1_counts, bin), axis=None)
 
-    # add segment list to the doc object. The segments have a pointer to the doc
-    char_spans = get_char_spans(texts)
-    doc = nlp(" ".join(texts))
-    doc.spans['token2segment'] = [doc.char_span(*cs, alignment_mode='expand') for cs in char_spans for _ in range(*cs)]  # a span for each token
-    doc.spans["segments"] = list(set(doc.spans['token2segment']))
-    # also add for each token its segment
-    for s in doc.spans["segments"]:
-        for t in s:
-            t._.segment = s
+    def parse_testimony(self, text):
+        doc = self.nlp(text)
+        # do coreference resolution
+        self.referencer.add_to_Doc(self.referencer.get_cr(doc.text))
+        return doc
 
-    # do coreference resolution
-    referencer.add_to_Doc(referencer.get_cr(doc.text))
-    # do srl
-    for i, s in enumerate(doc.spans["segments"]):
-        srler.add_to_Span(s, srler.parse(s.text, return_locs=True))
-        s._.feature_vector = make_features(s, i)
-        if labels:
-            s._.real_topic = labels[i]
+    def parse_from_segments(self, texts, labels=None):
+        # gets texts for one testimony and returns them as a spacy span with additional attributes
+        # add segment list to the doc object. The segments have a pointer to the doc
+        char_spans = self.get_char_spans(texts)
+        doc = self.nlp(" ".join(texts))
+        doc.spans['token2segment'] = [doc.char_span(*cs, alignment_mode='expand') for cs in char_spans for _ in range(*cs)]  # a span for each token
+        doc.spans["segments"] = list(set(doc.spans['token2segment']))
+        # also add for each token its segment
+        for s in doc.spans["segments"]:
+            for t in s:
+                t._.segment = s
 
-    return doc
+        # do coreference resolution
+        self.referencer.add_to_Doc(doc, *self.referencer.get_cr(doc.text))
+        # do srl
+        for i, s in enumerate(doc.spans["segments"]):
+            self.srler.add_to_Span(s, self.srler.parse(s.text))
+            s._.feature_vector = self.make_features(s, i)
+            if labels:
+                s._.real_topic = labels[i]
 
-def spacy_parse(data_path=None):
-    # make the data into spacy span with properties from the whole doc
-    nlp = spacy.load("en_core_web_trf", disable=["parser"])  #!!!
-    with open(data_path + 'sf_segments.json', 'r') as infile:
-        data = json.load(infile)
+        return doc
 
-    # docs = {}
-    doc_bin = DocBin(store_user_data=True)
-    for t, dicts in data.items():
-        print("Testimony: ", t)
-        # texts, bins = list(zip(*[(dict['text'], dict['bin']) for dict in dicts]))  # we will create the bins afterwards
-        texts, labels = list(zip(*[(dict['text'], dict['terms']) for dict in dicts]))
-        # docs[t] = parse_testimony(nlp, texts)
-        doc = parse_from_segments(nlp, texts)
-        doc_bin.add(doc)
-        doc_bin.to_disk(data_path + "data.spacy")
-        nlp.vocab.to_disk(data_path + "vocab")
+    def spacy_parse(self, data_path=None):
+        # make the data into spacy span with properties from the whole doc
+        with open(data_path + 'sf_segments.json', 'r') as infile:
+            data = json.load(infile)
 
-    # docs = list(docs.values())
-    # doc_bin = DocBin(docs=docs, store_user_data=True)
-    return
+        # docs = {}
+        doc_bin = DocBin(store_user_data=True)
+        for t, dicts in data.items():
+            print("Testimony: ", t)
+            # texts, bins = list(zip(*[(dict['text'], dict['bin']) for dict in dicts]))  # we will create the bins afterwards
+            texts, labels = list(zip(*[(dict['text'], dict['terms']) for dict in dicts]))
+            # docs[t] = parse_testimony(nlp, texts)
+            doc = self.parse_from_segments(texts)
+            doc_bin.add(doc)
+            doc_bin.to_disk(data_path + "data.spacy")
+            self.nlp.vocab.to_disk(data_path + "vocab")
+
+        # docs = list(docs.values())
+        # doc_bin = DocBin(docs=docs, store_user_data=True)
+        return
 
 
 if __name__ == "__main__":
+    nlp = spacy.load("en_core_web_trf")
     data_path = '/cs/snapless/oabend/eitan.wagner/segmentation/data/'
     # parse_from_xml(data_path)
-    spacy_parse(data_path)
+    parser = TestimonyParser(nlp)
+    parser.spacy_parse(data_path)
     # count_topics()
 
 # different format - 19895, 20218, 20367, 20405, 20505, 20873, 20909 etc.

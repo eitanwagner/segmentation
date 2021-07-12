@@ -24,13 +24,23 @@ Token.set_extension("arg0_span", default=None)  # type Span
 Token.set_extension("arg1_span", default=None)  # type Span
 Token.set_extension("verb_span", default=None)  # type Span
 
+import nltk
+from nltk.corpus import propbank
+from allennlp.predictors.predictor import Predictor
+import allennlp_models.tagging
+import allennlp_models.structured_prediction.predictors.srl
+from pathlib import Path
+CACHE_ROOT = Path("/cs/snapless/oabend/eitan.wagner/segmentation/.allennlp")
+CACHE_DIRECTORY = str(CACHE_ROOT / "cache")
+DEPRECATED_CACHE_DIRECTORY = str(CACHE_ROOT / "datasets")
+
 class Referencer:
-    def __init__(self, witness_name="Witness", interviewer_name="Interviewer"):
-        from allennlp.predictors.predictor import Predictor
-        import allennlp_models.tagging
+    def __init__(self, nlp):
         self.predictor = Predictor.from_path("https://storage.googleapis.com/allennlp-public-models/coref-spanbert-large-2021.03.10.tar.gz")
-        self.ents = [witness_name, interviewer_name, "Family - mother, father, sister, brother, aunt, uncle", "Nazis, Germans", "Concentration camp, Extermination camp", "Israel, Palastine", "United-states, America"]
-        self.nlp = spacy.load("en_core_web_trf")
+        # witness_name= "Witness"
+        # interviewer_name="Interviewer"
+        # self.ents = [witness_name, interviewer_name, "Family - mother, father, sister, brother, aunt, uncle", "Nazis, Germans", "Concentration camp, Extermination camp", "Israel, Palastine", "United-states, America"]
+        self.nlp = nlp
 
     def classify_clusters(self, clusters, document, use_len=UnicodeTranslateError):
         # gets list of cluster indices and returns an ent for each cluster
@@ -96,31 +106,27 @@ class Referencer:
 
 
 class SRLer:
-    def __init__(self):
-        from allennlp.predictors.predictor import Predictor
-        import allennlp_models.structured_prediction.predictors.srl
+    def __init__(self, nlp):
         self.predictor = Predictor.from_path("https://storage.googleapis.com/allennlp-public-models/structured-prediction-srl-bert.2020.12.15.tar.gz")
-        self.nlp = spacy.load("en_core_web_trf")
-        self.verbs = (v for v in self.nlp.vocab if v.pos_ == "VERB")
+        self.nlp = nlp
+        # self.verbs = (v for v in self.nlp.vocab if v.pos_ == "VERB")
+        nltk.download('propbank')
+        self.verbs = propbank.verbs()
 
-    def parse(self, text, return_locs=True):
+    def parse(self, text):
         srl = self.predictor.predict(text)
-        if return_locs:
-            locs_w_tags = [[(i, t) for i, t in enumerate(v['tags']) if t != 'O'] for v in srl['verbs']]
-            # these are all of the same length
-            arg0_locs = [[i for i, (_, t) in enumerate(l) if t.find("ARG0") != -1] for l in locs_w_tags]  # relative location
-            arg1_locs = [[i for i, (_, t) in enumerate(l) if t.find("ARG1") != -1] for l in locs_w_tags]
-            v_locs = [[i for i, (_, t) in enumerate(l) if t.find("-V") != -1] for l in locs_w_tags]
-            locs = [[i for i, t in l] for l in locs_w_tags]
-            return (locs, arg0_locs, arg1_locs, v_locs)
+        locs_w_tags = [[(i, t) for i, t in enumerate(v['tags']) if t != 'O'] for v in srl['verbs']]
+        # these are all of the same length
+        arg0_locs = [[i for i, (_, t) in enumerate(l) if t.find("ARG0") != -1] for l in locs_w_tags]  # relative location
+        arg1_locs = [[i for i, (_, t) in enumerate(l) if t.find("ARG1") != -1] for l in locs_w_tags]
+        v_locs = [[i for i, (_, t) in enumerate(l) if t.find("-V") != -1] for l in locs_w_tags]
+        locs = [[i for i, t in l] for l in locs_w_tags]
+        return (locs, arg0_locs, arg1_locs, v_locs)
 
+    def get_phrases(self, text):
+        srl = self.predictor.predict(text)
         verb_phrases_w_tags = [[(srl['words'][i], t) for i, t in enumerate(v['tags']) if v != 'O'] for v in srl['verbs']]
-
-        with_arg0 = [(v['description'], i) for i, v in enumerate(srl['verbs']) if v['description'].find("ARG0") != -1]
-        arg0s = [(d.split("[B-ARG0: ", 1)[1].split("]")[0], i) for d, i in with_arg0]  # a list of all ARG0 phrases in tuple with verb index
-        with_arg1 = [(v['description'], i) for i, v in enumerate(srl['verbs']) if v['description'].find("ARG1") != -1]
-        arg1s = [(d.split("[B-ARG1: ", 1)[1].split("]")[0], i) for d, i in with_arg1]
-        return verb_phrases_w_tags, arg0s, arg1s
+        return verb_phrases_w_tags
 
     def parse_simple(self, text):
         # returns a list of verb phrases for this text. Does not consider the roles

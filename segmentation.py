@@ -2,8 +2,7 @@
 import numpy as np
 import json
 
-from parse_sf import parse_testimony
-from parse_sf import make_features
+from parse_sf import TestimonyParser
 from textcat import SVMTextcat
 from gpt2 import GPT2Scorer
 import sys
@@ -19,7 +18,8 @@ class Segmentor:
         self.model = model
         self.nlp = spacy.load("en_core_web_trf")
         self.sents = list(self.doc.sents)  # these are spans!!!
-        self.doc = parse_testimony(self.nlp, text)
+        self.parser = TestimonyParser(self.nlp)
+        self.doc = self.parser.parse_testimony(text)
 
     def combine_sents(self, window=1, ratio=.5):
         # combines the top sentences. higher ratio means combining more
@@ -52,7 +52,7 @@ class Segmentor:
         # limit the length?
         # single example in batch
         span = self.doc[self.sents[start].start:self.sents[end].end]  # is the .end token included???
-        span._.feature_vector = make_features(span, 5 * (start + end) // len(self.sents))  # the bin is by the middle
+        span._.feature_vector = make_features(span, i=5 * (start + end) // len(self.sents), nlp=self.nlp)  # the bin is by the middle
 
         p, probs = self.model.predict(span)
         return p, probs
