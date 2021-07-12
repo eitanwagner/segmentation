@@ -35,23 +35,25 @@ CACHE_DIRECTORY = str(CACHE_ROOT / "cache")
 DEPRECATED_CACHE_DIRECTORY = str(CACHE_ROOT / "datasets")
 
 class Referencer:
-    def __init__(self, nlp):
+    def __init__(self, nlp, num_ents=50):
         self.predictor = Predictor.from_path("https://storage.googleapis.com/allennlp-public-models/coref-spanbert-large-2021.03.10.tar.gz")
         # witness_name= "Witness"
         # interviewer_name="Interviewer"
         # self.ents = [witness_name, interviewer_name, "Family - mother, father, sister, brother, aunt, uncle", "Nazis, Germans", "Concentration camp, Extermination camp", "Israel, Palastine", "United-states, America"]
         self.nlp = nlp
+        self.num_ents = num_ents
 
-    def classify_clusters(self, clusters, document, use_len=UnicodeTranslateError):
+    def classify_clusters(self, clusters, document, use_len=True):
         # gets list of cluster indices and returns an ent for each cluster
         # document is just text
 
         # for now just the index by the order!!! (and -1 for over 50)
         if use_len:
             # in this case we return a list of cluster indices by decreasing order, and -1 if no such cluster
-            len_ordered = [-1] * 50
+            len_ordered = [-1] * self.num_ents
             with_lens = [(len(c), i) for i, c in enumerate(clusters)]
-            len_ordered[:len(with_lens)] = list(zip(*sorted(with_lens)))[1]
+            # len_ordered[:len(with_lens)] = list(zip(*sorted(with_lens)))[1][:len(with_lens)]
+            len_ordered[:self.num_ents] = list(zip(*sorted(with_lens)))[1][:self.num_ents]
             # len_ordered = list(list(zip(*sorted(with_lens)))[1])
             return len_ordered
 
@@ -86,7 +88,7 @@ class Referencer:
         # we assume that the tokens are spacy ones!!!
         cr = self.predictor.predict(text)
         cluster_ents = self.classify_clusters(clusters=cr['clusters'], document=cr['document'])
-        return cr['clusters'], cluster_ents
+        return cr['clusters'][:self.num_ents], cluster_ents[:self.num_ents]
 
     def add_to_Doc(self, doc, clusters, max_ents):
         # TODO divide into two - add clusters with CR, and then when classifying add the ent_type
@@ -94,11 +96,11 @@ class Referencer:
         cluster_spans = []
         # doc._.clusters = clusters
         for c, e in zip(clusters, max_ents):
-            if e in self.ents:
+            # if e in self.ents:
                 for s in c:
                     span = doc[s[0]:s[1]+1]
                     cluster_spans.append(span)
-                    span._.ent_type = e
+                    span._.ent_type = max_ents.index(e)
                     for t in span:
                         t._.ent_span = span
         doc._.clusters = cluster_spans  # use doc.span[] instead!!!

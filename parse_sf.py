@@ -1,5 +1,5 @@
 
-
+import logging
 import json
 import xml.etree.ElementTree as ET
 from xml.etree.ElementTree import ParseError
@@ -16,7 +16,7 @@ Span.set_extension("bin", default=None)  # type [Span]
 # Doc.set_extension("token2segment", default=None)  # type [Span]  ???
 Token.set_extension("segment", default=None)  # parent segment. type Span
 
-Span.set_extension("feature_vectors", default=None)  # type np.array()
+Span.set_extension("feature_vector", default=None)  # type np.array()
 Span.set_extension("real_topic", default=None)  # type String
 
 
@@ -159,18 +159,15 @@ def parse_from_xml(data_path):
 # **************************
 # add additional properties
 
-
-# TODO: make into an object
 class TestimonyParser:
     def __init__(self, nlp):
         self.referencer, self.srler = Referencer(nlp), SRLer(nlp)
         self.nlp = nlp
-        print("Made testimony parser")
-
+        logging.info("Made testimony parser")
 
     def get_pipe(self, name):
         i = self.nlp.pipe_names.index(name)
-        return self.nlp.pipline(i)[1]  # the component without the name
+        return self.nlp.pipeline[i][1]  # the component without the name
 
     def get_char_spans(self, segments):
         # returns spact spans (for segemnts) given a list of segment texts
@@ -185,8 +182,7 @@ class TestimonyParser:
     def make_features(self, segment, i):
         # make ent features
         doc = segment.doc
-        ner = self.get_pipe("ner")
-        labels = ner.lables
+        labels = self.get_pipe("ner").labels
         ent_counts = np.zeros(len(labels))
         for ent in segment.ents:
             ent_counts[labels.index(ent.label_)] += 1
@@ -214,6 +210,7 @@ class TestimonyParser:
     def parse_from_segments(self, texts, labels=None):
         # gets texts for one testimony and returns them as a spacy span with additional attributes
         # add segment list to the doc object. The segments have a pointer to the doc
+        logging.info("Making spans...")
         char_spans = self.get_char_spans(texts)
         doc = self.nlp(" ".join(texts))
         doc.spans['token2segment'] = [doc.char_span(*cs, alignment_mode='expand') for cs in char_spans for _ in range(*cs)]  # a span for each token
@@ -224,13 +221,16 @@ class TestimonyParser:
                 t._.segment = s
 
         # do coreference resolution
+        logging.info("Making CR...")
         self.referencer.add_to_Doc(doc, *self.referencer.get_cr(doc.text))
         # do srl
+        logging.info("Making srls...")
         for i, s in enumerate(doc.spans["segments"]):
             self.srler.add_to_Span(s, self.srler.parse(s.text))
             s._.feature_vector = self.make_features(s, i)
             if labels:
                 s._.real_topic = labels[i]
+        logging.info("Made features")
 
         return doc
 
@@ -239,17 +239,22 @@ class TestimonyParser:
         with open(data_path + 'sf_segments.json', 'r') as infile:
             data = json.load(infile)
 
-        # docs = {}
-        doc_bin = DocBin(store_user_data=True)
+        doc_names = []
+        # doc_bin = DocBin(store_user_data=True)
         for t, dicts in data.items():
-            print("Testimony: ", t)
+            logging.info(f"Testimony: {t}")
             # texts, bins = list(zip(*[(dict['text'], dict['bin']) for dict in dicts]))  # we will create the bins afterwards
             texts, labels = list(zip(*[(dict['text'], dict['terms']) for dict in dicts]))
             # docs[t] = parse_testimony(nlp, texts)
             doc = self.parse_from_segments(texts)
-            doc_bin.add(doc)
-            doc_bin.to_disk(data_path + "data.spacy")
-            self.nlp.vocab.to_disk(data_path + "vocab")
+            doc_names.append(f"docs/doc_{t}")
+            doc.to_disk(doc_names[-1])
+            with open('docs/doc_names.json', "w") as outfile:
+                json.dump(doc_names, outfile)
+
+            # doc_bin.add(doc)
+            # doc_bin.to_disk(data_path + "data.spacy")
+            # self.nlp.vocab.to_disk(data_path + "docs/vocab")
 
         # docs = list(docs.values())
         # doc_bin = DocBin(docs=docs, store_user_data=True)
@@ -257,6 +262,10 @@ class TestimonyParser:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    import logging.config
+    logging.config.dictConfig({'version': 1, 'disable_existing_loggers': True, })
+
     nlp = spacy.load("en_core_web_trf")
     data_path = '/cs/snapless/oabend/eitan.wagner/segmentation/data/'
     # parse_from_xml(data_path)

@@ -17,7 +17,8 @@ from tqdm import tqdm
 
 import spacy
 from spacy.vocab import Vocab
-nlp = spacy.load("en_core_web_trf")
+from spacy.tokens import Doc
+# nlp = spacy.load("en_core_web_trf")
 
 
 class SVMTextcat:
@@ -52,8 +53,8 @@ class SVMTextcat:
         pred_logp = self.model.predict_log_proba(x)  # logP(t|x,s)
         vocab_size = len(self.vectorizer.tfidf.vocabulary_)
         lm_logp = -len(span) * np.log(vocab_size)  # logP(x|s)
-        len_logp = poisson.logpmf(len(doc)//8, self.prior_length//8)  # logP(s)
-        return logsumexp(preds_logp + lm_logp + len_logp), log_preds
+        len_logp = poisson.logpmf(len(span.doc)//8, self.prior_length//8)  # logP(s)
+        return logsumexp(pred_logp + lm_logp + len_logp), pred_logp
 
     def find_priors(self):
         # TODO: use new data. Or at least calculate real prior!!
@@ -107,13 +108,15 @@ class Vectorizer:
 class TextcatDataset:
     # hold the dataset and performs transforming and splitting
     def __init__(self, path):
+        self.path = path  # this is  in data/docs/
         # load the data
         # with open(path, 'r') as infile:
         #     data = json.load(infile)
-        vocab = Vocab().from_disk(path + "vocab")
-        doc_bin = DocBin().from_disk(path + "data.spacy")
 
-        data = [(segment, segment._.real_topic) for doc in doc_bin.get_docs(nlp.vocab) for segment in doc]
+        # doc_bin = DocBin().from_disk(path + "data.spacy")
+
+        # data = [(segment, segment._.real_topic) for doc in doc_bin.get_docs(nlp.vocab) for segment in doc]
+        data = [(segment, segment._.real_topic) for doc in self.get_docs() for segment in doc]
         np.random.shuffle(data)
         # store the inputs and outputs
         spans, self.y = list(zip(*data))
@@ -133,6 +136,13 @@ class TextcatDataset:
         self.y_test = self.y[int(0.8*len(self.y)):]
 
         self.dim = self.X.shape[1]
+
+    def get_docs(self):
+        # vocab = Vocab().from_disk(self.path + "vocab")
+        with open('doc_names.json', "r") as infile:
+            names = json.load(infile)
+        docs = [Doc(Vocab()).from_disk(name) for name in names]
+        return docs
 
     # number of rows in the dataset
     def __len__(self):
@@ -204,7 +214,7 @@ def test_model(model, dataset, random_state=42, out_path=None):
 if __name__ == "__main__":
     path = '/cs/snapless/oabend/eitan.wagner/segmentation/data/'
     model = SVMTextcat(base_path=path)
-    model.fit(data_path='data/', test=True)
+    model.fit(data_path='data/docs/', test=True)
     #
     # dataset = TextcatDataset(path)
     # model = train_svm(dataset, random_state=42, out_path='/cs/snapless/oabend/eitan.wagner/segmentation/models/')
