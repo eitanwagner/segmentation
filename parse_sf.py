@@ -5,8 +5,20 @@ import xml.etree.ElementTree as ET
 from xml.etree.ElementTree import ParseError
 
 import pandas as pd
+import numpy as np
+import spacy
+from spacy.tokens import Span
+from spacy.tokens import DocBin
+from spacy.tokens import Token
+Span.set_extension("bin", default=None)  # type [Span]
+# Doc.set_extension("token2segment", default=None)  # type [Span]  ???
+Token.set_extension("segment", default=None)  # parent segment. type Span
+
+Span.set_extension("feature_vectors", default=None)  # type np.array()
+Span.set_extension("real_topic", default=None)  # type String
 
 
+# not used
 def count_topics():
     data = pd.read_csv("Martha_transcripts/index segments for 1000 English Jewish survivor interviews.csv")
     # print(data.head())
@@ -34,6 +46,10 @@ def count_topics():
         json.dump(topic_count, outfile)
     with open('common_topics500.json', 'w') as outfile:
         json.dump(common_topics, outfile)
+
+
+# *************************
+# get data from raw xml (but given the word2topics dictionary
 
 def parse_from_xml(data_path):
     with open(data_path + 'words2topics-new.json', 'r') as infile:
@@ -138,53 +154,108 @@ def parse_from_xml(data_path):
     print("done")
 
 
-def spacy_parse():
+# **************************
+# add additional properties
+
+def get_pipe(doc, name):
+    i = doc.pipe_name.index(name)
+    return doc.pipline(i)[1]  # the component without the name
+
+def get_char_spans(segments):
+    # returns spact spans (for segemnts) given a list of segment texts
+    lens = [len(segment)+1 for segment in segments]
+    lens[-1] = lens[-1] - 1  # last segment has not extra space
+    end_chars = np.cumsum(lens)  # end not included
+    start_chars = np.zeros(len(segments), dtype=int)
+    start_chars[1:] = end_chars[:-1] + 1  # to skip the extra space
+    char_spans = list(zip(start_chars, end_chars))
+    return char_spans
+
+def make_features(segment, i):
+    # make ent features
+    doc = segment.doc
+    ner = get_pipe(doc, "ner")
+    labels = ner.lables
+    ent_counts = np.zeros(len(labels))
+    for ent in segment.ents:
+        ent_counts[labels.index(ent.label_)] += 1
+
+    # make srl features
+    verbs = (v for v in nlp.vocab if v.pos_ == "VERB")
+    verb_counts, arg0_counts, arg1_counts = np.zeros(len(verbs)), np.zeros(50), np.zeros(50)
+    for srl in segment._.srls:
+        if srl._.verb and srl._.verb._.verb_id:  # this should always be true
+            verb_counts[srl._.verb._.verb_id] += 1
+        if srl._.arg0 and srl._.arg0._.arg0_id:
+            arg0_counts[srl._.arg0._.arg0_id] += 1
+        if srl._.arg1 and srl._.arg1._.arg1_id:
+            arg1_counts[srl._.arg1._.arg1_id] += 1
+
+    bin = np.array(10 * i // len(doc.spans["segments"]))
+    return np.concatenate((ent_counts, verb_counts, arg0_counts, arg1_counts, bin), axis=None)
+
+def parse_testimony(nlp, text):
+    from segment_srl import Referencer, SRLer
+    referencer, srler = Referencer(), SRLer()
+
+    doc = nlp(text)
+    # do coreference resolution
+    referencer.add_to_Doc(referencer.get_cr(doc.text))
+    return doc
+
+def parse_from_segments(nlp, texts, labels=None):
+    # gets texts for one testimony and returns them as a spacy span with additional attributes
+    from segment_srl import Referencer, SRLer
+    referencer, srler = Referencer(), SRLer()  # this is wasteful
+
+    # add segment list to the doc object. The segments have a pointer to the doc
+    char_spans = get_char_spans(texts)
+    doc = nlp(" ".join(texts))
+    doc.spans['token2segment'] = [doc.char_span(*cs, alignment_mode='expand') for cs in char_spans for _ in range(*cs)]  # a span for each token
+    doc.spans["segments"] = list(set(doc.spans['token2segment']))
+    # also add for each token its segment
+    for s in doc.spans["segments"]:
+        for t in s:
+            t._.segment = s
+
+    # do coreference resolution
+    referencer.add_to_Doc(referencer.get_cr(doc.text))
+    # do srl
+    for i, s in enumerate(doc.spans["segments"]):
+        srler.add_to_Span(s, srler.parse(s.text, return_locs=True))
+        s._.feature_vector = make_features(s, i)
+        if labels:
+            s._.real_topic = labels[i]
+
+    return doc
+
+def spacy_parse(data_path=None):
+    # make the data into spacy span with properties from the whole doc
+    nlp = spacy.load("en_core_web_trf", disable=["parser"])  #!!!
+    with open(data_path + 'sf_segments.json', 'r') as infile:
+        data = json.load(infile)
+
+    # docs = {}
+    doc_bin = DocBin(store_user_data=True)
+    for t, dicts in data.items():
+        print("Testimony: ", t)
+        # texts, bins = list(zip(*[(dict['text'], dict['bin']) for dict in dicts]))  # we will create the bins afterwards
+        texts, labels = list(zip(*[(dict['text'], dict['terms']) for dict in dicts]))
+        # docs[t] = parse_testimony(nlp, texts)
+        doc = parse_from_segments(nlp, texts)
+        doc_bin.add(doc)
+        doc_bin.to_disk(data_path + "data.spacy")
+        nlp.vocab.to_disk(data_path + "vocab")
+
+    # docs = list(docs.values())
+    # doc_bin = DocBin(docs=docs, store_user_data=True)
     return
-
-def parse2():
-    with open('distinct_topics.json', 'r') as infile:
-        distinct_topics = json.load(infile)
-    topics = {}
-    last_topic = None
-    word2topic = {}
-    topic2words = {}
-    with open('new 2.txt', 'r') as infile:
-        lines = infile.readlines()
-    for i, line in enumerate(lines):
-        if line[1:12] == 'margin-left':
-            if line[15:17] == '18':
-                new_topic = line[18:].strip()
-                topic2words[new_topic] = set()
-                if new_topic != last_topic:
-                    if last_topic is not None:
-                        topics[last_topic] = (topics[last_topic], i-1)
-                    last_topic = new_topic
-                topics[new_topic] = i
-
-            for dt in distinct_topics:
-                f = line.find(dt)
-                if 20 >= f >= 0 and f + len(dt) + 3 >= len(line):
-                # if f >= 0:
-                    topic2words[new_topic].add(dt)
-                    # word2topic[dt] = new_topic
-
-    topic2words = {t: list(w) for t, w in topic2words.items()}
-    words2topic = {w: t for t, words in topic2words.items() for w in words}
-    with open('words2topics.json', 'w') as outfile:
-        json.dump(words2topic, outfile)
-    with open('topic2words.json', 'w') as outfile:
-        json.dump(topic2words, outfile)
-    print(topics)
-    # all_text = ' '.join(lines)
-    # for dt in distinct_topics:
-    #     all_text.find(dt)
-
-    pass
 
 
 if __name__ == "__main__":
     data_path = '/cs/snapless/oabend/eitan.wagner/segmentation/data/'
-    parse_from_xml(data_path)
+    # parse_from_xml(data_path)
+    spacy_parse(data_path)
     # count_topics()
 
 # different format - 19895, 20218, 20367, 20405, 20505, 20873, 20909 etc.

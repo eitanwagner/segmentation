@@ -2,19 +2,24 @@
 import numpy as np
 import json
 
-from text_cat import SpacyCat
+from parse_sf import parse_testimony
+from parse_sf import make_features
+from textcat import SVMTextcat
 from gpt2 import GPT2Scorer
 import sys
+import spacy
 
 class Segmentor:
-    def __init__(self, sent_list, model=None):
-        self.sents = sent_list
+    def __init__(self, text, model=None):
         self.segments = [0]  # list of segment starts
         self.ps = None  # list of probabilities for the segments
+        self.topic_assignments = None  # list of sampled assignments
 
         self.cats = model.topics
         self.model = model
-        self.topic_assignments = None  # list of sampled assignments
+        self.nlp = spacy.load("en_core_web_trf")
+        self.sents = list(self.doc.sents)  # these are spans!!!
+        self.doc = parse_testimony(self.nlp, text)
 
     def combine_sents(self, window=1, ratio=.5):
         # combines the top sentences. higher ratio means combining more
@@ -24,17 +29,20 @@ class Segmentor:
         for j, s in enumerate(self.sents):
             if j < window:
                 continue
-            gpt2_p1 = scorer.sentence_score(" ".join(self.sents[j-window:j+window]))
-            gpt2_p2 = scorer.sentence_score(" ".join(self.sents[j-window:j])) \
-                      + scorer.sentence_score(" ".join(self.sents[j:j+window]))
+            # gpt2_p1 = scorer.sentence_score(" ".join(self.sents[j-window:j+window]))
+            gpt2_p1 = scorer.sentence_score(self.doc[self.sents[j-window].start:self.sents[j+window].end].text)
+            # gpt2_p2 = scorer.sentence_score(" ".join(self.sents[j-window:j])) \
+            #           + scorer.sentence_score(" ".join(self.sents[j:j+window]))
+            gpt2_p2 = scorer.sentence_score(self.doc[self.sents[j-window].start:self.sents[j].end].text) \
+                      + scorer.sentence_score(self.doc[self.sents[j].start:self.sents[j+window].end].text)
             diffs.append((gpt2_p1 - gpt2_p2, j))
 
-        diffs.sort(key=lambda x:x[0], reverse=True)
-        # print(len(diffs))
-        js = sorted([d[1] for d in diffs[:int(len(diffs)*ratio)]], reverse=True)
-        # print(len(js))
+        # diffs.sort(key=lambda x: x[0], reverse=True)
+        diffs.sort(reverse=True)
+        js = sorted([d[1] for d in diffs[:int(len(diffs) * ratio)]], reverse=True)
         for j in js:
-            self.sents[j-1] = self.sents[j-1] + ' ' + self.sents[j]
+            # self.sents[j-1] = self.sents[j-1] + ' ' + self.sents[j]
+            self.sents[j-1] = self.doc[self.sents[j-1].start:self.sents[j].end]
             self.sents[j] = None
         self.sents = [s for s in self.sents if s is not None]
 
@@ -43,9 +51,11 @@ class Segmentor:
         # returns also the log-probabilities for classification
         # limit the length?
         # single example in batch
-        bin = str((10 * start) // len(self.sents))  # this uses the combined sents!
-        p, prior = self.model.predict(" ".join(self.sents[start:end]) + "BIN_" + bin, use_Pt=False)
-        return p, prior
+        span = self.doc[self.sents[start].start:self.sents[end].end]  # is the .end token included???
+        span._.feature_vector = make_features(span, 5 * (start + end) // len(self.sents))  # the bin is by the middle
+
+        p, probs = self.model.predict(span)
+        return p, probs
 
     def find_segments(self, use_heuristic=True):
         """
@@ -71,7 +81,7 @@ class Segmentor:
             p_costs = [p[0] + p[1] for p in prevs]
 
             # find best prev
-            # prevent same segment!
+            # prevent same segment??
             m = int(np.argmax(p_costs))
             prev_score.append(p_costs[m])
             # print("prev_state:", prev_state)
@@ -136,11 +146,15 @@ class Segmentor:
             f.close()
 
 
-def get_testimony_sents(i):
-    with open('sents.json', 'r') as infile:
+def get_testimony_sents(i, data_path='/cs/snapless/oabend/eitan.wagner/segmentation/data/'):
+    with open(data_path + 'sents.json', 'r') as infile:
         sents = json.load(infile)[str(i)]
     return sents
 
+def get_testimony_text(i, data_path='/cs/snapless/oabend/eitan.wagner/segmentation/data/'):
+    with open(data_path + 'raw_text.json', 'r') as infile:
+        text = json.load(infile)[str(i)]
+    return text
 
 if __name__ == '__main__':
     print("Starting")
@@ -151,17 +165,18 @@ if __name__ == '__main__':
     print("Batch:", batch)
     sys.stdout.flush()
 
-    model_id = sys.argv[3][:3]
-    if model_id[:3] == "bow":
-        model_id = "-" + model_id[:3]
+    # model_id = sys.argv[3][:3]
+    # if model_id[:3] == "svm":
+    #     model_id = "-" + model_id[:3]
 
-    model = SpacyCat(model_id=model_id)
+    # model = SpacyCat(model_id=model_id)
+    model = SVMTextcat(base_path='/cs/snapless/oabend/eitan.wagner/segmentation/').from_path()
     model.find_priors()
 
-    all_segments = {}
+    # all_segments = {}
     for i in range(111, 114):
         print(f'\n\n\nTestimony {i}:')
-        d = Segmentor(sent_list=get_testimony_sents(i)[:], model=model)
+        d = Segmentor(text=get_testimony_text(i)[:], model=model)
         d.combine_sents(window=int(sys.argv[1]), ratio=float(sys.argv[2]))
 
         print("\n\nFinding segments: ")
