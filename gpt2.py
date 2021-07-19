@@ -23,8 +23,8 @@ MAX_LEN, MIN_LEN = 800, 35
 
 class GPT2Scorer:
     def __init__(self):
-        self.tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
-        self.model = GPT2LMHeadModel.from_pretrained('gpt2')
+        self.tokenizer = GPT2TokenizerFast.from_pretrained('gpt2', cache_dir='/cs/snapless/oabend/eitan.wagner/cache/')
+        self.model = GPT2LMHeadModel.from_pretrained('gpt2', cache_dir='/cs/snapless/oabend/eitan.wagner/cache/')
         self.model.to(dev)
 
     def sentence_score(self, sent):

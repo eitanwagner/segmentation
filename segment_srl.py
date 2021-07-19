@@ -5,38 +5,46 @@ from spacy.tokens import Doc
 from spacy.tokens import Span
 from spacy.tokens import Token
 
-# for CR clusters
-# TODO We need pointers to the segments also!!!
-Doc.set_extension("clusters", default=None)  # type [Span]  Use Doc.spans instead!!!!
-Span.set_extension("ent_type", default=None)  # type String  Use span._label??
-Token.set_extension("ent_span", default=None)  # type Span
-
-Span.set_extension("srls", default=None)  # type [Span]
-Span.set_extension("arg0", default=None)  # type Span
-Span.set_extension("arg1", default=None)  # type Span
-Span.set_extension("verb", default=None)  # type Span
-Span.set_extension("verb_id", default=None)  # type int (or None if not verb)
-Span.set_extension("arg0_id", default=None)  # type int (or None if not an arg0 span)
-Span.set_extension("arg1_id", default=None)  # type int (or None if not an arg1 span)
-
-Token.set_extension("srl_span", default=None)  # type Span
-Token.set_extension("arg0_span", default=None)  # type Span
-Token.set_extension("arg1_span", default=None)  # type Span
-Token.set_extension("verb_span", default=None)  # type Span
-
 import nltk
 from nltk.corpus import propbank
 from allennlp.predictors.predictor import Predictor
 import allennlp_models.tagging
 import allennlp_models.structured_prediction.predictors.srl
+
+import torch
+if torch.cuda.is_available():
+    dev = torch.device("cuda:0")
+    print("Running on the GPU")
+else:
+    dev = torch.device("cpu")
+    print("Running on the CPU")
+
+
 from pathlib import Path
 CACHE_ROOT = Path("/cs/snapless/oabend/eitan.wagner/segmentation/.allennlp")
 CACHE_DIRECTORY = str(CACHE_ROOT / "cache")
 DEPRECATED_CACHE_DIRECTORY = str(CACHE_ROOT / "datasets")
 
+span_extensions = ["ent_type", "srls", "arg0", "arg1", "verb", "verb_id", "arg0_id", "arg1_id"]  # for removing
+token_extensions = ["ent_span", "srl_span", "arg0_span", "arg1_span", "verb_span"]
+
+def add_extensions():
+    for ext in span_extensions:
+        Span.set_extension(ext, default=None)
+    for ext in token_extensions:
+        Token.set_extension(ext, default=None)
+
+def remove_extensions():
+    for ext in span_extensions:
+        Span.remove_extension(ext)
+    for ext in token_extensions:
+        Token.remove_extension(ext)
+
+
 class Referencer:
     def __init__(self, nlp, num_ents=50):
         self.predictor = Predictor.from_path("https://storage.googleapis.com/allennlp-public-models/coref-spanbert-large-2021.03.10.tar.gz")
+        self.predictor._model = self.predictor._model.to(dev)
         # witness_name= "Witness"
         # interviewer_name="Interviewer"
         # self.ents = [witness_name, interviewer_name, "Family - mother, father, sister, brother, aunt, uncle", "Nazis, Germans", "Concentration camp, Extermination camp", "Israel, Palastine", "United-states, America"]
@@ -86,7 +94,12 @@ class Referencer:
     def get_cr(self, text):
         # this receives the text and not the doc object
         # we assume that the tokens are spacy ones!!!
-        cr = self.predictor.predict(text)
+        try:
+            cr = self.predictor.predict(text)
+        except RuntimeError:  # not enough memory on the gpu
+            self.predictor._model = self.predictor._model.cpu()
+            cr = self.predictor.predict(text)
+            self.predictor._model = self.predictor._model.to(dev)
         cluster_ents = self.classify_clusters(clusters=cr['clusters'], document=cr['document'])
         return cr['clusters'][:self.num_ents], cluster_ents[:self.num_ents]
 
@@ -103,13 +116,14 @@ class Referencer:
                     span._.ent_type = max_ents.index(e)
                     for t in span:
                         t._.ent_span = span
-        doc._.clusters = cluster_spans  # use doc.span[] instead!!!
+        doc.spans["clusters"] = cluster_spans  # use doc.span[] instead!!!
         return
 
 
 class SRLer:
     def __init__(self, nlp):
         self.predictor = Predictor.from_path("https://storage.googleapis.com/allennlp-public-models/structured-prediction-srl-bert.2020.12.15.tar.gz")
+        self.predictor._model = self.predictor._model.to(dev)
         self.nlp = nlp
         # self.verbs = (v for v in self.nlp.vocab if v.pos_ == "VERB")
         nltk.download('propbank')
@@ -137,11 +151,15 @@ class SRLer:
         return verb_phrases
 
     def add_to_Span(self, span, loc_tuples):
+        # add also to doc!!!
+        doc = span.doc
         locs, arg0_locs, arg1_locs, v_locs = loc_tuples
         # gets spacy span (segment) and adds the srl attribute to each span
         srls = []
         # doc._.clusters = clusters
         for l, a0, a1, v in zip(locs, arg0_locs, arg1_locs, v_locs):
+            if len(l) == 0:
+                continue
             srl_span = span[l[0]:l[-1]]
             srls.append(srl_span)
             for t in srl_span:
@@ -166,4 +184,8 @@ class SRLer:
                     if t.pos_ == "VERB" and t.lemma_ in self.verbs:  # if more than one with pos verb then takes the last!!
                         srl_span._.verb_id = self.verbs.index(t.lemma_)
         span._.srls = srls
+        doc.spans["srls"].append(srls)  # should not be None
         return
+
+    def add_to_new_span(self, span):
+        span._.srls = [srl for srl in span.doc.spans["srls"] if span.start <= srl.start <= span.end]

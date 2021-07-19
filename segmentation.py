@@ -4,22 +4,28 @@ import json
 
 from parse_sf import TestimonyParser
 from textcat import SVMTextcat
+from textcat import Vectorizer
 from gpt2 import GPT2Scorer
 import sys
 import spacy
+import logging
 
 class Segmentor:
     def __init__(self, text, model=None):
         self.segments = [0]  # list of segment starts
+        self.segment_spans = []  # list of segment spacy spans
+        self.max_srls = []
         self.ps = None  # list of probabilities for the segments
         self.topic_assignments = None  # list of sampled assignments
 
         self.cats = model.topics
         self.model = model
         self.nlp = spacy.load("en_core_web_trf")
-        self.sents = list(self.doc.sents)  # these are spans!!!
         self.parser = TestimonyParser(self.nlp)
-        self.doc = self.parser.parse_testimony(text)
+        self.doc = self.parser.parse_testimony(text)  # does CR but not srl
+        self.doc.spans["segments"] = []
+        self.doc.spans["srls"] = []  # initialize srls for this doc
+        self.sents = list(self.doc.sents)  # these are spans!!!
 
     def combine_sents(self, window=1, ratio=.5):
         # combines the top sentences. higher ratio means combining more
@@ -27,14 +33,14 @@ class Segmentor:
         scorer = GPT2Scorer()
         diffs = []
         for j, s in enumerate(self.sents):
-            if j < window:
+            if j < window or j + window >= len(self.sents):
                 continue
             # gpt2_p1 = scorer.sentence_score(" ".join(self.sents[j-window:j+window]))
-            gpt2_p1 = scorer.sentence_score(self.doc[self.sents[j-window].start:self.sents[j+window].end].text)
+            gpt2_p1 = scorer.sentence_score(self.doc[self.sents[j-window].start:self.sents[j+window].start].text)
             # gpt2_p2 = scorer.sentence_score(" ".join(self.sents[j-window:j])) \
             #           + scorer.sentence_score(" ".join(self.sents[j:j+window]))
-            gpt2_p2 = scorer.sentence_score(self.doc[self.sents[j-window].start:self.sents[j].end].text) \
-                      + scorer.sentence_score(self.doc[self.sents[j].start:self.sents[j+window].end].text)
+            gpt2_p2 = scorer.sentence_score(self.doc[self.sents[j-window].start:self.sents[j].start].text) \
+                      + scorer.sentence_score(self.doc[self.sents[j].start:self.sents[j+window].start].text)
             diffs.append((gpt2_p1 - gpt2_p2, j))
 
         # diffs.sort(key=lambda x: x[0], reverse=True)
@@ -42,17 +48,18 @@ class Segmentor:
         js = sorted([d[1] for d in diffs[:int(len(diffs) * ratio)]], reverse=True)
         for j in js:
             # self.sents[j-1] = self.sents[j-1] + ' ' + self.sents[j]
-            self.sents[j-1] = self.doc[self.sents[j-1].start:self.sents[j].end]
+            self.sents[j-1] = self.doc[self.sents[j-1].start:self.sents[j].start]
             self.sents[j] = None
         self.sents = [s for s in self.sents if s is not None]
+        logging.info("Combined sentences")
 
     def segment_score(self, start, end):
         # calculate the log-probability for this segment using marginalization
         # returns also the log-probabilities for classification
         # limit the length?
         # single example in batch
-        span = self.doc[self.sents[start].start:self.sents[end].end]  # is the .end token included???
-        span._.feature_vector = make_features(span, i=5 * (start + end) // len(self.sents), nlp=self.nlp)  # the bin is by the middle
+        span = self.doc[self.sents[start].start:self.sents[end].start]  # we don't want the end sentence too
+        span._.feature_vector = self.parser.make_new_features(span, bin=int(5 * (start + end) / len(self.sents)))  # the bin is by the middle
 
         p, probs = self.model.predict(span)
         return p, probs
@@ -69,10 +76,10 @@ class Segmentor:
         prev_score = [0]  # a list of scores with the optimal previous
         last = 0  # for heuristic. maybe relax to use previous last
 
-        print("len: ", len(self.sents))
+        logging.info(f"len: {len(self.sents)}")
         for i in range(1, len(self.sents)):
             if i % 10 == 0:
-                print("i: ", i)
+                logging.info(f"i: {i}")
                 sys.stdout.flush()
 
             js = range(last, i)
@@ -92,19 +99,23 @@ class Segmentor:
                 last += m
 
         # backward pass
-        segments = []
+        # segments = []
+        segment_spans = []
         i = len(prev_v) - 1
         p = np.exp(probs[-1])  # this is the probability vector
         ps = [p]
         while i > 0:
+            segment_spans = [self.doc[self.sents[prev_v[i]].start:self.sents[i].start]] + segment_spans
             i = prev_v[i]
-            segments = [i] + segments
+            # segments = [i] + segments
             if i > 0:
                 p = np.exp(probs[i])
                 ps = [p] + ps
 
-        self.segments, self.ps = segments, ps
-        return segments, ps
+        # self.segments, self.ps = segments, ps
+        self.segment_spans, self.ps = segment_spans, ps
+        # return segments, ps
+        return segment_spans, ps
 
     def sample_topics(self, num=1):
         # returns random topic assignments, without doubles, for the requested amount
@@ -127,21 +138,33 @@ class Segmentor:
                     return topic_assignments
         return None
 
-    def srls(self, topic_assignment):
+    def find_srls(self, topic_assignment, count=1):
         # finds srl units for each segement, and ranks them according to the connection with the chosen topic_assignment
-        return
+        # returns a list (even if count=1)
+        # TODO: for now this is only used for the first topic assignment. maybe we can use the assignment distribution??
+        for span, topic in zip(self.segment_spans, topic_assignment):
+            if span._.srls is not None:
+                # do we need to  find the srls???
+                sorted_srls = sorted(zip([self.model.predict(srl)[topic] for srl in span._.srls], range(len(span._.srls))), reverse=True)
+                self.max_srls.append([span._.srls[i] for _, i in sorted_srls[:count]])
+            else:
+                self.max_srls.append([])
+        return [[srl.text for srl in srls] for srls in self.max_srls]  # this is the texts
 
     def print_segments(self, name=None):
         # segments is list of first sents
         if name is not None:
             f = open(name, "a+")
-        with_last = self.segments + [len(self.sents)]
-        for i in range(len(self.segments)):
-            print(f"************************** Segment {i}, topic for each assignment: {[self.cats[s[i]] for s in self.topic_assignments]} ***********************")
-            for s in self.sents[with_last[i]:with_last[i+1]]:
-                print(s)
+        for assignment in self.topic_assignments:
+            for i, segment in enumerate(self.segment_spans):
+                logging.info(f"************************** Segment {i}, topic: {self.cats[assignment[i]]} ***********************")
+                if len(self.max_srls[i]) > 0:
+                    logging.info(f"************************** srls: {self.max_srls[assignment[i]]} ***********************")
+                else:
+                    logging.info(f"************************** srls: {None} ***********************")
+                logging.info(segment.text)
                 if name is not None:
-                    f.write(s)
+                    f.write(segment.text)
         if name is not None:
             f.close()
 
@@ -157,12 +180,18 @@ def get_testimony_text(i, data_path='/cs/snapless/oabend/eitan.wagner/segmentati
     return text
 
 if __name__ == '__main__':
-    print("Starting")
-    print("GPT2 window:", sys.argv[1])
-    print("GPT2 ratio:", sys.argv[2])
-    print("model id:", sys.argv[3])
+    logging.basicConfig(level=logging.INFO)
+    import logging.config
+    logging.config.dictConfig({'version': 1, 'disable_existing_loggers': True, })
+
+    # gpt2_window, gpt2_ratio, model_id = sys.argv[1], sys.argv[2], sys.argv[3]
+    gpt2_window, gpt2_ratio, model_id = 2, 0.5, "svm"
+    logging.info("Starting")
+    logging.info(f"GPT2 window: {gpt2_window}")
+    logging.info(f"GPT2 ratio: {gpt2_ratio}")
+    logging.info(f"model id: {model_id}")
     batch = False
-    print("Batch:", batch)
+    logging.info(f"Batch: {batch}")
     sys.stdout.flush()
 
     # model_id = sys.argv[3][:3]
@@ -175,14 +204,16 @@ if __name__ == '__main__':
 
     # all_segments = {}
     for i in range(111, 114):
-        print(f'\n\n\nTestimony {i}:')
-        d = Segmentor(text=get_testimony_text(i)[:], model=model)
-        d.combine_sents(window=int(sys.argv[1]), ratio=float(sys.argv[2]))
+        logging.info(f'\n\n\nTestimony {i}:')
+        d = Segmentor(text=get_testimony_text(i)[:1000], model=model)
+        d.combine_sents(window=int(gpt2_window), ratio=float(gpt2_ratio))
 
-        print("\n\nFinding segments: ")
+        logging.info("\n\nFinding segments: ")
         c = d.find_segments()
-        print(c)
-        d.print_segments()
+        logging.info(c)
+        assignment = d.sample_topics(num=1)[0]
+        d.find_srls(topic_assignment=assignment, count=2)
+        d.print_segments(name="outfile.txt")
         #
         # with open('/cs/snapless/oabend/eitan.wagner/TM_clustering/temp_segments.json', "w+") as outfile:
         #     json.dump(all_segments, outfile)

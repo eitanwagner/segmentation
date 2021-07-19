@@ -1,10 +1,12 @@
 
 import logging
 import json
+# import pickle
 import xml.etree.ElementTree as ET
 from xml.etree.ElementTree import ParseError
 
 from segment_srl import Referencer, SRLer
+import segment_srl
 
 import pandas as pd
 import numpy as np
@@ -12,12 +14,29 @@ import spacy
 from spacy.tokens import Span
 from spacy.tokens import DocBin
 from spacy.tokens import Token
-Span.set_extension("bin", default=None)  # type [Span]
-# Doc.set_extension("token2segment", default=None)  # type [Span]  ???
-Token.set_extension("segment", default=None)  # parent segment. type Span
 
-Span.set_extension("feature_vector", default=None)  # type np.array()
+Span.set_extension("feature_vector", default=None)  # type list
 Span.set_extension("real_topic", default=None)  # type String
+
+span_extensions = ["bin"]  # for removing
+token_extensions = ["segment"]
+
+# VECTOR_LEN = 100
+VECTOR_LEN = 768
+
+def add_extensions():
+    for ext in span_extensions:
+        Span.set_extension(ext, default=None)
+    for ext in token_extensions:
+        Token.set_extension(ext, default=None)
+    segment_srl.add_extensions()
+
+def remove_extensions():
+    for ext in span_extensions:
+        Span.remove_extension(ext)
+    for ext in token_extensions:
+        Token.remove_extension(ext)
+    segment_srl.remove_extensions()
 
 
 # not used
@@ -162,6 +181,7 @@ def parse_from_xml(data_path):
 class TestimonyParser:
     def __init__(self, nlp):
         self.referencer, self.srler = Referencer(nlp), SRLer(nlp)
+        add_extensions()
         self.nlp = nlp
         logging.info("Made testimony parser")
 
@@ -179,6 +199,51 @@ class TestimonyParser:
         char_spans = list(zip(start_chars, end_chars))
         return char_spans
 
+    # Define a method that takes a Span as input and returns the Transformer
+    # output.
+    def span_vector(self, span):
+        # Get alignment information for Span. This is achieved by using
+        # the 'doc' attribute of Span that refers to the Doc that contains
+        # this Span. We then use the 'start' and 'end' attributes of a Span
+        # to retrieve the alignment information. Finally, we flatten the
+        # resulting array to use it for indexing.
+        tensor_ix = span.doc._.trf_data.align[span.start: span.end].data.flatten()
+        # Fetch Transformer output shape from the final dimension of the output.
+        # We do this here to maintain compatibility with different Transformers,
+        # which may output tensors of different shape.
+        out_dim = span.doc._.trf_data.tensors[0].shape[-1]
+        # Get Token tensors under tensors[0]. Reshape batched outputs so that
+        # each "row" in the matrix corresponds to a single token. This is needed
+        # for matching alignment information under 'tensor_ix' to the Transformer
+        # output.
+        tensor = span.doc._.trf_data.tensors[0].reshape(-1, out_dim)[tensor_ix]
+        # Average vectors along axis 0 ("columns"). This yields a 768-dimensional
+        # vector for each spaCy Span.
+        return tensor.mean(axis=0)
+
+    def make_new_features(self, segment, bin):
+        # this is for a new segment (for inference
+        # make ent features
+        doc = segment.doc
+        labels = self.get_pipe("ner").labels
+        ent_counts = np.zeros(len(labels))
+        for ent in segment.ents:
+            ent_counts[labels.index(ent.label_)] += 1
+        vec = self.span_vector(segment)
+        verbs = self.srler.verbs
+        self.srler.add_to_new_span(segment)
+        verb_counts, arg0_counts, arg1_counts = np.zeros(len(verbs)), np.zeros(50), np.zeros(50)
+        for srl in segment._.srls:
+            if srl._.verb and srl._.verb._.verb_id:  # this should always be true
+                verb_counts[srl._.verb._.verb_id] += 1
+            if srl._.arg0 and srl._.arg0._.arg0_id:
+                arg0_counts[srl._.arg0._.arg0_id] += 1
+            if srl._.arg1 and srl._.arg1._.arg1_id:
+                arg1_counts[srl._.arg1._.arg1_id] += 1
+
+        return list(np.concatenate((ent_counts, verb_counts, arg0_counts, arg1_counts, bin, vec), axis=None))
+
+
     def make_features(self, segment, i):
         # make ent features
         doc = segment.doc
@@ -187,7 +252,30 @@ class TestimonyParser:
         for ent in segment.ents:
             ent_counts[labels.index(ent.label_)] += 1
 
+        # add span vector and sentiment
+        # vec = np.zeros(VECTOR_LEN)
+        # if segment.has_vector:
+        #     vec[:len(segment.vector[:VECTOR_LEN])] = segment.vector[:VECTOR_LEN]
+        #     logging.info(vec)
+        # else:
+        #     # vec = np.zeros(VECTOR_LEN)
+        #     logging.warning("No vector")
+        vec = self.span_vector(segment)
+        if segment._.srls is None or len(segment._.srls) == 0:  # for a new segment. Separate!!
+            verbs = self.srler.verbs
+            if doc.spans.get("segments", None) is None:
+                bin = 0
+            else:
+                # bin = int((10 * i) / len(doc.spans["segments"]))
+                bin = i  
+            verb_counts, arg0_counts, arg1_counts = np.zeros(len(verbs)), np.zeros(50), np.zeros(50)
+            return list(np.concatenate((ent_counts, verb_counts, arg0_counts, arg1_counts, bin, vec), axis=None))
+
+        # logging.info(vec)
+        # sentiment = segment.sentiment
+
         # make srl features
+        # this is for making the whole testimony from segments
         verbs = self.srler.verbs
         verb_counts, arg0_counts, arg1_counts = np.zeros(len(verbs)), np.zeros(50), np.zeros(50)
         for srl in segment._.srls:
@@ -198,13 +286,19 @@ class TestimonyParser:
             if srl._.arg1 and srl._.arg1._.arg1_id:
                 arg1_counts[srl._.arg1._.arg1_id] += 1
 
-        bin = np.array(10 * i // len(doc.spans["segments"]))
-        return np.concatenate((ent_counts, verb_counts, arg0_counts, arg1_counts, bin), axis=None)
+        bin = int((10 * i) / len(doc.spans["segments"]))
+        bin_vec = np.zeros(10)
+        bin_vec[bin] = 1
+        logging.info(f"Lengths (ent, srls, vec, bin): {len(ent_counts)}, {len(verb_counts)+len(arg0_counts)+ len(arg1_counts)}, {len(vec)}, {len(bin_vec)}")
+        #  INFO: root:Lengths(ent, srls, ( and len_bin = 1) vec: 18, 3357, 1, 768  # changed!!
+        #  INFO: root:Lengths(ent, srls, ( and len_bin = 1) vec: 18, 3357, 768, 10  # new!!
+        return list(np.concatenate((ent_counts, verb_counts, arg0_counts, arg1_counts, vec, bin_vec),
+                                   axis=None))  # so it will be serializable
 
     def parse_testimony(self, text):
         doc = self.nlp(text)
         # do coreference resolution
-        self.referencer.add_to_Doc(self.referencer.get_cr(doc.text))
+        self.referencer.add_to_Doc(doc, *self.referencer.get_cr(doc.text))
         return doc
 
     def parse_from_segments(self, texts, labels=None):
@@ -213,8 +307,10 @@ class TestimonyParser:
         logging.info("Making spans...")
         char_spans = self.get_char_spans(texts)
         doc = self.nlp(" ".join(texts))
-        doc.spans['token2segment'] = [doc.char_span(*cs, alignment_mode='expand') for cs in char_spans for _ in range(*cs)]  # a span for each token
-        doc.spans["segments"] = list(set(doc.spans['token2segment']))
+        # doc.spans['token2segment'] = [doc.char_span(*cs, alignment_mode='expand') for cs in char_spans for _ in range(*cs)]  # a span for each token
+        # doc.spans["segments"] = list(set(doc.spans['token2segment']))
+        doc.spans["segments"] = [doc.char_span(*cs, alignment_mode='expand') for cs in char_spans]
+        logging.info(f"num_segments: {len(doc.spans['segments'])}")
         # also add for each token its segment
         for s in doc.spans["segments"]:
             for t in s:
@@ -239,26 +335,44 @@ class TestimonyParser:
         with open(data_path + 'sf_segments.json', 'r') as infile:
             data = json.load(infile)
 
-        doc_names = []
+        with open(data_path + 'docs/doc_nums.json', "r") as infile:
+            doc_nums = json.load(infile)
+
+        new_data = {}
         # doc_bin = DocBin(store_user_data=True)
         for t, dicts in data.items():
+            if t in doc_nums:
+                continue
             logging.info(f"Testimony: {t}")
             # texts, bins = list(zip(*[(dict['text'], dict['bin']) for dict in dicts]))  # we will create the bins afterwards
             texts, labels = list(zip(*[(dict['text'], dict['terms']) for dict in dicts]))
             # docs[t] = parse_testimony(nlp, texts)
-            doc = self.parse_from_segments(texts)
-            doc_names.append(f"docs/doc_{t}")
-            doc.to_disk(doc_names[-1])
-            with open('docs/doc_names.json', "w") as outfile:
-                json.dump(doc_names, outfile)
+            # add_extensions()
+            doc = self.parse_from_segments(texts, labels=labels)  # we don't transform labels yet
+            new_data[t] = self.get_lists(doc)
+            doc_nums.append(t)
+            # remove_extensions()
+            # with open(data_path + "docs/" + doc_names[-1]) as outfile:
+            #     pickle.dump(doc, outfile)
+
+            # doc.to_disk(data_path + "docs/" + doc_names[-1])
+            with open(data_path + 'docs/doc_nums2.json', "w+") as outfile:
+                json.dump(doc_nums, outfile)
+            with open(data_path + 'docs/data2.json', "w+") as outfile:  # did I overwrite the old data???
+                json.dump(new_data, outfile)
 
             # doc_bin.add(doc)
-            # doc_bin.to_disk(data_path + "data.spacy")
+            # doc_bin.to_disk(data_path + "docs/data.spacy")
             # self.nlp.vocab.to_disk(data_path + "docs/vocab")
 
         # docs = list(docs.values())
         # doc_bin = DocBin(docs=docs, store_user_data=True)
+        logging.info("Created data")
         return
+
+    def get_lists(self, doc):
+        # get a list of segments with the relevant info for saving
+        return [(segment.text, segment._.feature_vector, segment._.real_topic) for segment in doc.spans["segments"]]
 
 
 if __name__ == "__main__":
@@ -267,6 +381,7 @@ if __name__ == "__main__":
     logging.config.dictConfig({'version': 1, 'disable_existing_loggers': True, })
 
     nlp = spacy.load("en_core_web_trf")
+    # add_extensions()
     data_path = '/cs/snapless/oabend/eitan.wagner/segmentation/data/'
     # parse_from_xml(data_path)
     parser = TestimonyParser(nlp)

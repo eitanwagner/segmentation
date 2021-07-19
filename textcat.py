@@ -1,28 +1,30 @@
-from numpy import vstack
-from numpy import argmax
+
 import numpy as np
 from scipy.sparse import csr_matrix
 from scipy.special import logsumexp
 from scipy.stats import poisson
+from scipy.sparse import hstack
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import accuracy_score
 
+import logging
 import json
+import pickle
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split
-# from sklearn.externals import joblib
 import joblib
-
-from tqdm import tqdm
-
-import spacy
+from spacy.tokens import DocBin
 from spacy.vocab import Vocab
-from spacy.tokens import Doc
-# nlp = spacy.load("en_core_web_trf")
+
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import TfidfTransformer
+
+import parse_sf  # this should set all the extensions too
 
 
 class SVMTextcat:
-    def __init__(self, base_path='/cs/snapless/oabend/eitan.wagner/segmentation/'):
+    def __init__(self, base_path='/cs/snapless/oabend/eitan.wagner/segmentation/', extra_features=None):
+        self.extra_features = extra_features
         self.model = None
         self.vectorizer = None
         self.base_path = base_path
@@ -37,20 +39,25 @@ class SVMTextcat:
         return self
 
     def fit(self, data_path=None, test=False):
-        dataset = TextcatDataset(self.base_path + data_path)
+        dataset = TextcatDataset(self.base_path + data_path, self.extra_features)
         self.vectorizer = dataset.vectorizer
-        self.model = train_svm(dataset, random_state=42, out_path=self.base_path+"models/")  # !!!
-        test_model(self.model, dataset, out_path=self.base_path + 'models/results/')
+        # self.model = train_svm(dataset, random_state=42, out_path=self.base_path + "models/")  # !!!
+        if self.extra_features != 'ents_bin2':
+            self.model = train_svm(dataset, random_state=42, out_path=None)  # !!!
+        else:
+            self.model = train_svm(dataset, random_state=42, out_path=self.base_path+'models/')
+        if test:
+            test_model(self.model, dataset, out_path=self.base_path + 'models/results/')
 
         self.topics = self.vectorizer.encoder.classes_  # these are the strings
         return self
 
     def predict(self, span):
         # returns probabilities for a Span, as a tuple of (marginal_likelihood, classification_probability)
-        x = self.vectorizer.transform(span)
+        x = self.vectorizer.transform([span.text], [span._.feature_vector])  # this is 2 dimensional!
 
         # do we need P(t)?
-        pred_logp = self.model.predict_log_proba(x)  # logP(t|x,s)
+        pred_logp = np.ravel(self.model.predict_log_proba(x))  # logP(t|x,s)
         vocab_size = len(self.vectorizer.tfidf.vocabulary_)
         lm_logp = -len(span) * np.log(vocab_size)  # logP(x|s)
         len_logp = poisson.logpmf(len(span.doc)//8, self.prior_length//8)  # logP(s)
@@ -63,31 +70,79 @@ class SVMTextcat:
 
         lengths = [len(text.split(" ")) for _, text in title_w_segments]
         self.prior_length = sum(lengths) / len(title_w_segments)  # the average length. not exact!!!
-        print("calculated priors")
+        logging.info("calculated priors")
 
 
 class Vectorizer:
     # creates vectors for texts
     # the text should be spaCy Spans
     # this also deals with the labels
-    def __init__(self):
+    def __init__(self, extra_features=None):
+        self.use_extra_features = extra_features
         self.tfidf = TfidfVectorizer()
         self.encoder = LabelEncoder()
 
-    def fit_transform(self, spans):
-        texts = [s.text for s in spans]
-        extra_features = [s._.feature_vectors for s in spans]  # any span should have this
-        X = self.tfidf.fit_transform(texts)
-        X = np.concatenate((X, np.array(extra_features).T), axis=1)
+        self.vectorizer = CountVectorizer()
+        self.tfidf_transformer = TfidfTransformer()
+
+    def fit_transform(self, texts, extra_features):
+        # texts = [s.text for s in spans]
+        # extra_features = [s._.feature_vectors for s in spans]  # any span should have this
+        X = self.tfidf.fit_transform(texts).astype(dtype=float)
+        if self.use_extra_features == 'all':
+            X = hstack((X, np.array(extra_features, dtype=float)))
+        elif self.use_extra_features == 'bins':
+            X = hstack((X, np.array(extra_features, dtype=float)[:, -10:]))
+        elif self.use_extra_features == 'vectors':  # vectors and bin
+            X = np.array(extra_features, dtype=float)[:, -778:]
+        elif self.use_extra_features == 'ents_srls_bin':  # but no vectors
+            X = hstack((X, np.array(extra_features, dtype=float)[:, :-778], np.array(extra_features, dtype=float)[:, -10:]))
+        elif self.use_extra_features == 'ents_bin':
+            X = self.tfidf.fit_transform(texts).astype(dtype=float)
+            X = hstack((X, np.array(extra_features, dtype=float)[:, :18], np.array(extra_features, dtype=float)[:, -10:]))
+        elif self.use_extra_features == 'ents_bin2':
+            X = hstack((self.vectorizer.fit_transform(texts), np.array(extra_features, dtype=float)[:, :18], np.array(extra_features, dtype=float)[:, -10:]))
+            X = csr_matrix(np.nan_to_num(X.todense()), dtype=float)
+            X = self.tfidf_transformer.fit_transform(X)
+        elif self.use_extra_features == 'ents_srls_bin2':
+            X = hstack((self.vectorizer.fit_transform(texts), np.array(extra_features, dtype=float)[:, :-778], np.array(extra_features, dtype=float)[:, -10:]))
+            X = csr_matrix(np.nan_to_num(X.todense()), dtype=float)
+            X = self.tfidf_transformer.fit_transform(X)
+        elif self.use_extra_features == 'bin2':
+            X = hstack((self.vectorizer.fit_transform(texts), np.array(extra_features, dtype=float)[:, -10:]))
+            X = csr_matrix(np.nan_to_num(X.todense()), dtype=float)
+            X = self.tfidf_transformer.fit_transform(X)
         # here we add features
         return X
 
-    def transform(self, spans):
-        texts = [s.text for s in spans]
-        extra_features = [s._.feature_vectors for s in spans]  # any span should have this
+    def transform(self, texts, extra_features):  # TODO: fix!!!!
+        # texts = [s.text for s in spans]
+        # extra_features = [s._.feature_vectors for s in spans]  # any span should have this
         X = self.tfidf.transform(texts)
         # here we add features
-        X = np.concatenate((X, np.array(extra_features).T), axis=1)
+        if self.use_extra_features == 'all':
+            X = hstack((X, np.array(extra_features, dtype=float)))
+        elif self.use_extra_features == 'bins':
+            X = hstack((X, np.array(extra_features, dtype=float)[:, [3375]]))
+        elif self.use_extra_features == 'vectors':
+            X = np.array(extra_features, dtype=float)[:, -769:]
+        elif self.use_extra_features == 'ents_srls_bin':
+            X = hstack((X, np.array(extra_features, dtype=float)[:, :-768]))
+        elif self.use_extra_features == 'ents_bin':
+            X = self.tfidf.transform(texts).astype(dtype=float)
+            X = hstack((X, np.array(extra_features, dtype=float)[:, list(range(18)) + [3375]]))
+        elif self.use_extra_features == 'ents_bin2':
+            X = self.vectorizer.transform(texts)
+            X = self.tfidf_transformer.transform(
+                hstack((X, np.array(extra_features, dtype=float)[:, list(range(18)) + [3375]])))
+        elif self.use_extra_features == 'ents_srls_bin2':
+            X = self.vectorizer.transform(texts)
+            X = self.tfidf_transformer.transform(
+                hstack((X, np.array(extra_features, dtype=float)[:, :-768])))
+        elif self.use_extra_features == 'bin2':
+            X = self.vectorizer.transform(texts)
+            X = self.tfidf_transformer.transform(
+                hstack((X, np.array(extra_features, dtype=float)[:, [3375]])))# here we add features
         return X
 
     def label_fit(self, y):
@@ -107,33 +162,35 @@ class Vectorizer:
 # dataset definition
 class TextcatDataset:
     # hold the dataset and performs transforming and splitting
-    def __init__(self, path):
+    def __init__(self, data_path, extra_features=None):
         self.path = path  # this is  in data/docs/
         # load the data
-        # with open(path, 'r') as infile:
-        #     data = json.load(infile)
+        with open(data_path + "data1.json", 'r') as infile:
+            data = json.load(infile)
 
-        # doc_bin = DocBin().from_disk(path + "data.spacy")
-
-        # data = [(segment, segment._.real_topic) for doc in doc_bin.get_docs(nlp.vocab) for segment in doc]
-        data = [(segment, segment._.real_topic) for doc in self.get_docs() for segment in doc]
-        np.random.shuffle(data)
+        # doc_bin = DocBin().from_disk(path + "docs/data.spacy")
+        # vocab = Vocab().from_disk(self.path + "docs/vocab")
+        # data = [(segment, segment._.real_topic) for doc in doc_bin.get_docs(vocab) for segment in doc.spans["segments"]]
+        data = [data_tuple for t_data in data.values() for data_tuple in t_data]
+        # np.random.shuffle(data)
         # store the inputs and outputs
-        spans, self.y = list(zip(*data))
-        # self.y, self.X = list(zip(*data))
+        texts, vectors, self.y = list(zip(*data))
         # self.vectorizer = TfidfVectorizer()
-        self.vectorizer = Vectorizer()
-        self.X = self.vectorizer.fit_transform(spans)
-        self.X = csr_matrix(self.X, dtype=np.float32)
+        self.vectorizer = Vectorizer(extra_features)
+        self.X = self.vectorizer.fit_transform(texts, vectors)
+        self.X = csr_matrix(self.X, dtype=float)
 
         # label encode target and ensure the values are floats
+        self.y = [t[0] for t in self.y]
         self.vectorizer.label_fit(self.y)
-        self.y = self.vectorizer.label_transform(self.y)
+        self.y = self.vectorizer.label_transform(self.y).astype(dtype=float)
+        # logging.info(f"y_shape {self.y}")
+        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(self.X, self.y, test_size=0.2, random_state=42)
 
-        self.X_train = self.X[:int(0.8*self.X.shape[0]), :]
-        self.X_test = self.X[int(0.8*self.X.shape[0]):, :]
-        self.y_train = self.y[:int(0.8*len(self.y))]
-        self.y_test = self.y[int(0.8*len(self.y)):]
+        # self.X_train = self.X[:int(0.8*self.X.shape[0]), :]
+        # self.X_test = self.X[int(0.8*self.X.shape[0]):, :]
+        # self.y_train = self.y[:int(0.8*len(self.y))]
+        # self.y_test = self.y[int(0.8*len(self.y)):]
 
         self.dim = self.X.shape[1]
 
@@ -141,7 +198,11 @@ class TextcatDataset:
         # vocab = Vocab().from_disk(self.path + "vocab")
         with open('doc_names.json', "r") as infile:
             names = json.load(infile)
-        docs = [Doc(Vocab()).from_disk(name) for name in names]
+        # docs = [Doc(Vocab()).from_disk(name) for name in names]
+        docs = []
+        for name in names:
+            with open(self.path + name) as infile:
+                docs.append(pickle.load(infile))
         return docs
 
     # number of rows in the dataset
@@ -160,24 +221,35 @@ class TextcatDataset:
 
     def id2lables(self, y):
         # converts a response vector back to the original label strings
-        return self.encoder.inverse_transform(self.y)
+        return self.vectorizer.encoder.inverse_transform(self.y)
 
 
 def train_svm(dataset, random_state=42, out_path=None):
     # trains an SVM model on the given dataset
     X_train, X_test, y_train, y_test = dataset.get_splits(0.2, random_state=random_state)
+    X_train = csr_matrix(np.nan_to_num(X_train.todense()), dtype=float)
+    X_test = csr_matrix(np.nan_to_num(X_test.todense()), dtype=float)
 
     from sklearn import svm
     clf = svm.SVC(kernel='rbf', probability=True, gamma='scale', class_weight='balanced')
     # Train the model using the training sets
-    print("Training SVM")
+    logging.info("Training SVM")
+    # logging.info(f"X_shape {X_train.shape}")
+    # logging.info(f"y_shape {y_train.shape}")
+
+    # logging.info(f"nan: {len(np.argwhere(np.isnan(X_train.todense())))}")
+    # logging.info(f"finite: {np.all(np.isfinite(X_train.todense()))}")
+    # X_train = X_train.todense()
+    # X_train[np.argwhere(np.isnan(X_train))] = 0
     clf.fit(X_train, y_train)
 
     #Predict the response for test dataset
+    y_pred = clf.predict(X_train)
+    logging.info(f"SVM Accuracy (train): {accuracy_score(y_train, y_pred)}")
     y_pred = clf.predict(X_test)
-    print("SVM Accuracy:", accuracy_score(y_test, y_pred))
+    logging.info(f"SVM Accuracy (test): {accuracy_score(y_test, y_pred)}")
     # save
-    if out_path:
+    if out_path is not None:
         joblib.dump(clf, out_path + 'svm.pkl')
         joblib.dump(dataset.vectorizer, out_path + 'vectorizer.pkl')
     return clf
@@ -185,7 +257,9 @@ def train_svm(dataset, random_state=42, out_path=None):
 
 def test_model(model, dataset, random_state=42, out_path=None):
     X_train, X_test, y_train, y_test = dataset.get_splits(0.2, random_state=random_state)
-    labels = dataset.encoder.classes_
+    X_train = csr_matrix(np.nan_to_num(X_train.todense()), dtype=float)
+    X_test = csr_matrix(np.nan_to_num(X_test.todense()), dtype=float)
+    labels = dataset.vectorizer.encoder.classes_
     import pandas as pd
 
     train_conf = pd.DataFrame(np.zeros((len(labels), len(labels))), index=labels, columns=labels)
@@ -193,16 +267,16 @@ def test_model(model, dataset, random_state=42, out_path=None):
 
     # train_texts = list(zip(X_train, dataset.encoder.inverse_transform(y_train)))
     # eval_texts = list(zip(X_test, dataset.encoder.inverse_transform(y_test)))
-    y_labels_train = dataset.encoder.inverse_transform(y_train)
-    y_labels_eval = dataset.encoder.inverse_transform(y_test)
+    y_labels_train = dataset.vectorizer.encoder.inverse_transform(y_train)
+    y_labels_eval = dataset.vectorizer.encoder.inverse_transform(y_test)
     train_correct = 0
     eval_correct = 0
     # column is the predicted and row is the real. NO!!! the opposite!
-    preds = dataset.encoder.inverse_transform(model.predict(X_train))
+    preds = dataset.vectorizer.encoder.inverse_transform(model.predict(X_train))
     for i, p in enumerate(preds):
         train_conf[y_labels_train[i]][p] += 1
 
-    preds = dataset.encoder.inverse_transform(model.predict(X_test))
+    preds = dataset.vectorizer.encoder.inverse_transform(model.predict(X_test))
     for i, p in enumerate(preds):
         eval_conf[y_labels_eval[i]][p] += 1
 
@@ -212,9 +286,44 @@ def test_model(model, dataset, random_state=42, out_path=None):
 
 
 if __name__ == "__main__":
-    path = '/cs/snapless/oabend/eitan.wagner/segmentation/data/'
-    model = SVMTextcat(base_path=path)
-    model.fit(data_path='data/docs/', test=True)
+    logging.basicConfig(level=logging.INFO)
+    import logging.config
+    logging.config.dictConfig({'version': 1, 'disable_existing_loggers': True, })
+
+    path = '/cs/snapless/oabend/eitan.wagner/segmentation/'
+    logging.info("Training - no extra features")
+    model = SVMTextcat(base_path=path, extra_features=None)
+    model.fit(data_path='data/docs/')
+
+    logging.info("\nTraining - only bins in tfidf")
+    model = SVMTextcat(base_path=path, extra_features='bin2')
+    model.fit(data_path='data/docs/')
+
+    logging.info("\nTraining - ents and bins in tfidf")
+    model = SVMTextcat(base_path=path, extra_features='ents_bin2')
+    model.fit(data_path='data/docs/')
+
+    logging.info("\nTraining - ents, srls and bins in tfidf")
+    model = SVMTextcat(base_path=path, extra_features='ents_srls_bin2')
+    model.fit(data_path='data/docs/')
+
+    logging.info("Training - all extra features")
+    model = SVMTextcat(base_path=path, extra_features='all')
+    model.fit(data_path='data/docs/')
+
+    logging.info("Training - only vectors and bin")
+    model = SVMTextcat(base_path=path, extra_features='vectors')
+    model.fit(data_path='data/docs/')
+
+    logging.info("Training - with ents, srls and bin")
+    model = SVMTextcat(base_path=path, extra_features='ents_srls_bin')
+    model.fit(data_path='data/docs/')
+
+    logging.info("Training - with ents, and bin")
+    model = SVMTextcat(base_path=path, extra_features='ents_bin')
+    model.fit(data_path='data/docs/')
+
+
     #
     # dataset = TextcatDataset(path)
     # model = train_svm(dataset, random_state=42, out_path='/cs/snapless/oabend/eitan.wagner/segmentation/models/')
