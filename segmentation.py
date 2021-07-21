@@ -18,14 +18,18 @@ class Segmentor:
         self.ps = None  # list of probabilities for the segments
         self.topic_assignments = None  # list of sampled assignments
 
-        self.cats = model.topics
+        if model is not None:
+            self.cats = model.topics
+        else:
+            self.cats = None
         self.model = model
         self.nlp = spacy.load("en_core_web_trf")
         self.parser = TestimonyParser(self.nlp)
         self.doc = self.parser.parse_testimony(text)  # does CR but not srl
-        self.doc.spans["segments"] = []
-        self.doc.spans["srls"] = []  # initialize srls for this doc
         self.sents = list(self.doc.sents)  # these are spans!!!
+        for s in self.sents:
+            self.parser.srler.add_to_Span(s, self.parser.srler.parse(s.text))
+
 
     def combine_sents(self, window=1, ratio=.5):
         # combines the top sentences. higher ratio means combining more
@@ -58,9 +62,12 @@ class Segmentor:
         # returns also the log-probabilities for classification
         # limit the length?
         # single example in batch
-        span = self.doc[self.sents[start].start:self.sents[end].start]  # we don't want the end sentence too
-        span._.feature_vector = self.parser.make_new_features(span, bin=int(5 * (start + end) / len(self.sents)))  # the bin is by the middle
 
+        # create span
+        span = self.doc[self.sents[start].start:self.sents[end].start]  # we don't want the end sentence too
+        # get features
+        span._.feature_vector = self.parser.make_new_features(span, bin=int(5 * (start + end) / len(self.sents)))  # the bin is by the middle
+        # get probability by model
         p, probs = self.model.predict(span)
         return p, probs
 
@@ -139,13 +146,18 @@ class Segmentor:
         return None
 
     def find_srls(self, topic_assignment, count=1):
-        # finds srl units for each segement, and ranks them according to the connection with the chosen topic_assignment
+        # finds srl units for each segment, and ranks them according to the connection with the chosen topic_assignment
         # returns a list (even if count=1)
         # TODO: for now this is only used for the first topic assignment. maybe we can use the assignment distribution??
         for span, topic in zip(self.segment_spans, topic_assignment):
+            self.parser.srler.add_to_new_span(span)  # this was probably done already
+            # srls, first_last = self.parser.srler.parse_simple(span.text)
+            # span._.srls = [span[first:last+1] for first, last in first_last]
+            for s in span._.srls:
+                s._.feature_vector = self.parser.make_new_features(s, bin=int(5 * (s.start + s.end) / len(self.doc)))
             if span._.srls is not None:
-                # do we need to  find the srls???
-                sorted_srls = sorted(zip([self.model.predict(srl)[topic] for srl in span._.srls], range(len(span._.srls))), reverse=True)
+                # should we use priors? should we sample?
+                sorted_srls = sorted(zip([self.model.predict(srl)[1][topic] for srl in span._.srls], range(len(span._.srls))), reverse=True)
                 self.max_srls.append([span._.srls[i] for _, i in sorted_srls[:count]])
             else:
                 self.max_srls.append([])
@@ -159,7 +171,7 @@ class Segmentor:
             for i, segment in enumerate(self.segment_spans):
                 logging.info(f"************************** Segment {i}, topic: {self.cats[assignment[i]]} ***********************")
                 if len(self.max_srls[i]) > 0:
-                    logging.info(f"************************** srls: {self.max_srls[assignment[i]]} ***********************")
+                    logging.info(f"************************** srls: {[srl.text for srl in self.max_srls[i]]} ***********************")
                 else:
                     logging.info(f"************************** srls: {None} ***********************")
                 logging.info(segment.text)
@@ -203,14 +215,14 @@ if __name__ == '__main__':
     model.find_priors()
 
     # all_segments = {}
-    for i in range(111, 114):
+    for i in range(112, 115):
         logging.info(f'\n\n\nTestimony {i}:')
-        d = Segmentor(text=get_testimony_text(i)[:1000], model=model)
+        d = Segmentor(text=get_testimony_text(i)[:], model=model)
         d.combine_sents(window=int(gpt2_window), ratio=float(gpt2_ratio))
 
         logging.info("\n\nFinding segments: ")
         c = d.find_segments()
-        logging.info(c)
+        # logging.info(c)
         assignment = d.sample_topics(num=1)[0]
         d.find_srls(topic_assignment=assignment, count=2)
         d.print_segments(name="outfile.txt")

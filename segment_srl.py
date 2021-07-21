@@ -30,9 +30,9 @@ token_extensions = ["ent_span", "srl_span", "arg0_span", "arg1_span", "verb_span
 
 def add_extensions():
     for ext in span_extensions:
-        Span.set_extension(ext, default=None)
+        Span.set_extension(ext, default=None, force=True)
     for ext in token_extensions:
-        Token.set_extension(ext, default=None)
+        Token.set_extension(ext, default=None, force=True)
 
 def remove_extensions():
     for ext in span_extensions:
@@ -130,6 +130,7 @@ class SRLer:
         self.verbs = propbank.verbs()
 
     def parse(self, text):
+        # TODO: take care of long texts!!!
         srl = self.predictor.predict(text)
         locs_w_tags = [[(i, t) for i, t in enumerate(v['tags']) if t != 'O'] for v in srl['verbs']]
         # these are all of the same length
@@ -139,20 +140,25 @@ class SRLer:
         locs = [[i for i, t in l] for l in locs_w_tags]
         return (locs, arg0_locs, arg1_locs, v_locs)
 
-    def get_phrases(self, text):
+    def get_phrases(self, text):  # not used!!
         srl = self.predictor.predict(text)
         verb_phrases_w_tags = [[(srl['words'][i], t) for i, t in enumerate(v['tags']) if v != 'O'] for v in srl['verbs']]
         return verb_phrases_w_tags
 
-    def parse_simple(self, text):
+    def parse_simple(self, text):  # not used!!
         # returns a list of verb phrases for this text. Does not consider the roles
         srl = self.predictor.predict(text)
+        locs_w_tags = [[(i, t) for i, t in enumerate(v['tags']) if t != 'O'] for v in srl['verbs']]
+        first_last = [(l[0][0], l[-1][0]) for l in locs_w_tags]
         verb_phrases = [" ".join([srl['words'][i] for i, t in enumerate(v['tags']) if v != 'O']) for v in srl['verbs']]
-        return verb_phrases
+        return verb_phrases, first_last
 
-    def add_to_Span(self, span, loc_tuples):
+    def add_to_Span(self, span, loc_tuples, to_doc=False):
         # add also to doc!!!
-        doc = span.doc
+        if not to_doc:
+            doc = span.doc
+        else:
+            doc = span
         locs, arg0_locs, arg1_locs, v_locs = loc_tuples
         # gets spacy span (segment) and adds the srl attribute to each span
         srls = []
@@ -183,9 +189,16 @@ class SRLer:
                     t._.verb_span = verb_span
                     if t.pos_ == "VERB" and t.lemma_ in self.verbs:  # if more than one with pos verb then takes the last!!
                         srl_span._.verb_id = self.verbs.index(t.lemma_)
-        span._.srls = srls
-        doc.spans["srls"].append(srls)  # should not be None
+        if to_doc:
+            doc.spans["srls"] = srls
+        else:
+            doc.spans["srls"].extend(srls)  # should not be None. Is this used????
+            span._.srls = srls
         return
 
     def add_to_new_span(self, span):
-        span._.srls = [srl for srl in span.doc.spans["srls"] if span.start <= srl.start <= span.end]
+        span._.srls = [srl for srl in span.doc.spans["srls"] if span.start <= srl.start < span.end]
+
+    # def span_srls(self, span):
+    #     span._.srls = [srl for srl in span.doc.spans["srls"] if span.start <= srl.start <= span.end]
+    #     return

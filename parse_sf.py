@@ -15,8 +15,8 @@ from spacy.tokens import Span
 from spacy.tokens import DocBin
 from spacy.tokens import Token
 
-Span.set_extension("feature_vector", default=None)  # type list
-Span.set_extension("real_topic", default=None)  # type String
+Span.set_extension("feature_vector", default=None, force=True)  # type list
+Span.set_extension("real_topic", default=None, force=True)  # type String
 
 span_extensions = ["bin"]  # for removing
 token_extensions = ["segment"]
@@ -26,9 +26,9 @@ VECTOR_LEN = 768
 
 def add_extensions():
     for ext in span_extensions:
-        Span.set_extension(ext, default=None)
+        Span.set_extension(ext, default=None, force=True)
     for ext in token_extensions:
-        Token.set_extension(ext, default=None)
+        Token.set_extension(ext, default=None, force=True)
     segment_srl.add_extensions()
 
 def remove_extensions():
@@ -224,14 +224,15 @@ class TestimonyParser:
     def make_new_features(self, segment, bin):
         # this is for a new segment (for inference
         # make ent features
-        doc = segment.doc
         labels = self.get_pipe("ner").labels
         ent_counts = np.zeros(len(labels))
         for ent in segment.ents:
             ent_counts[labels.index(ent.label_)] += 1
+
         vec = self.span_vector(segment)
         verbs = self.srler.verbs
         self.srler.add_to_new_span(segment)
+
         verb_counts, arg0_counts, arg1_counts = np.zeros(len(verbs)), np.zeros(50), np.zeros(50)
         for srl in segment._.srls:
             if srl._.verb and srl._.verb._.verb_id:  # this should always be true
@@ -241,7 +242,10 @@ class TestimonyParser:
             if srl._.arg1 and srl._.arg1._.arg1_id:
                 arg1_counts[srl._.arg1._.arg1_id] += 1
 
-        return list(np.concatenate((ent_counts, verb_counts, arg0_counts, arg1_counts, bin, vec), axis=None))
+        bin_vec = np.zeros(10)
+        bin_vec[bin] = 1
+        # return list(np.concatenate((ent_counts, verb_counts, arg0_counts, arg1_counts, bin, vec), axis=None))
+        return list(np.concatenate((ent_counts, verb_counts, arg0_counts, arg1_counts, vec, bin_vec), axis=None))
 
 
     def make_features(self, segment, i):
@@ -261,15 +265,15 @@ class TestimonyParser:
         #     # vec = np.zeros(VECTOR_LEN)
         #     logging.warning("No vector")
         vec = self.span_vector(segment)
-        if segment._.srls is None or len(segment._.srls) == 0:  # for a new segment. Separate!!
-            verbs = self.srler.verbs
-            if doc.spans.get("segments", None) is None:
-                bin = 0
-            else:
-                # bin = int((10 * i) / len(doc.spans["segments"]))
-                bin = i  
-            verb_counts, arg0_counts, arg1_counts = np.zeros(len(verbs)), np.zeros(50), np.zeros(50)
-            return list(np.concatenate((ent_counts, verb_counts, arg0_counts, arg1_counts, bin, vec), axis=None))
+        # if segment._.srls is None or len(segment._.srls) == 0:  # for a new segment. Separate!!
+        #     verbs = self.srler.verbs
+        #     if doc.spans.get("segments", None) is None:
+        #         bin = 0
+        #     else:
+        #         # bin = int((10 * i) / len(doc.spans["segments"]))
+        #         bin = i
+        #     verb_counts, arg0_counts, arg1_counts = np.zeros(len(verbs)), np.zeros(50), np.zeros(50)
+        #     return list(np.concatenate((ent_counts, verb_counts, arg0_counts, arg1_counts, bin, vec), axis=None))
 
         # logging.info(vec)
         # sentiment = segment.sentiment
@@ -299,6 +303,8 @@ class TestimonyParser:
         doc = self.nlp(text)
         # do coreference resolution
         self.referencer.add_to_Doc(doc, *self.referencer.get_cr(doc.text))
+        doc.spans["segments"] = []
+        doc.spans["srls"] = []  # initialize srls for this doc
         return doc
 
     def parse_from_segments(self, texts, labels=None):
