@@ -9,12 +9,14 @@ from gpt2 import GPT2Scorer
 import sys
 import spacy
 import logging
+from summarize import Summarizer
 
 class Segmentor:
     def __init__(self, text, model=None):
         self.segments = [0]  # list of segment starts
         self.segment_spans = []  # list of segment spacy spans
         self.max_srls = []
+        self.summaries = []
         self.ps = None  # list of probabilities for the segments
         self.topic_assignments = None  # list of sampled assignments
 
@@ -25,6 +27,7 @@ class Segmentor:
         self.model = model
         self.nlp = spacy.load("en_core_web_trf")
         self.parser = TestimonyParser(self.nlp)
+        self.summarizer = Summarizer(self.model)
         self.doc = self.parser.parse_testimony(text)  # does CR but not srl
         self.sents = list(self.doc.sents)  # these are spans!!!
         for s in self.sents:
@@ -124,7 +127,7 @@ class Segmentor:
         # return segments, ps
         return segment_spans, ps
 
-    def sample_topics(self, num=1):
+    def sample_topics(self, num=3):
         # returns random topic assignments, without doubles, for the requested amount
         def has_doubles(l):
             for i, v in enumerate(l[1:], start=1):
@@ -163,20 +166,27 @@ class Segmentor:
                 self.max_srls.append([])
         return [[srl.text for srl in srls] for srls in self.max_srls]  # this is the texts
 
+    def find_summaries(self, topic_assignment, count=1):
+        for span, topic in zip(self.segment_spans, topic_assignment):
+            self.summaries.append(self.summarizer.get_ranked_sents(span.as_doc(), max_depth=6, class_num=topic)[:count])  # is topic the same as the label for the model???
+        return self.summaries
+
     def print_segments(self, name=None):
         # segments is list of first sents
         if name is not None:
             f = open(name, "a+")
-        for assignment in self.topic_assignments:
-            for i, segment in enumerate(self.segment_spans):
-                logging.info(f"************************** Segment {i}, topic: {self.cats[assignment[i]]} ***********************")
-                if len(self.max_srls[i]) > 0:
-                    logging.info(f"************************** srls: {[srl.text for srl in self.max_srls[i]]} ***********************")
-                else:
-                    logging.info(f"************************** srls: {None} ***********************")
-                logging.info(segment.text)
-                if name is not None:
-                    f.write(segment.text)
+        # for assignment in self.topic_assignments:
+        for i, segment in enumerate(self.segment_spans):
+            logging.info(f"************************** Segment {i}, topic: {[self.cats[assignment[i]] for assignment in self.topic_assignments]} ***********************")
+            if len(self.max_srls) > 0 and len(self.max_srls[i]) > 0:
+                logging.info(f"************************** srls (for first): {[srl.text for srl in self.max_srls[i]]} ***********************")
+            elif len(self.summaries[i]) > 0:
+                logging.info(f"************************** summaries (for first): {[summary[1] for summary in self.summaries[i]]} ***********************")
+            else:
+                logging.info(f"************************** {None} ***********************")
+            logging.info(segment.text)
+            if name is not None:
+                f.write(segment.text)
         if name is not None:
             f.close()
 
@@ -190,6 +200,17 @@ def get_testimony_text(i, data_path='/cs/snapless/oabend/eitan.wagner/segmentati
     with open(data_path + 'raw_text.json', 'r') as infile:
         text = json.load(infile)[str(i)]
     return text
+
+def get_sf_testimony_text(i, data_path='/cs/snapless/oabend/eitan.wagner/segmentation/data/'):
+    with open(data_path + 'sf_raw_text.json', 'r') as infile:
+        text = json.load(infile)[str(i)]
+    return text
+
+def get_sf_testimony_nums(data_path='/cs/snapless/oabend/eitan.wagner/segmentation/data/'):
+    with open(data_path + 'sf_raw_text.json', 'r') as infile:
+        nums = list(json.load(infile).keys())
+    return nums
+
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
@@ -214,18 +235,26 @@ if __name__ == '__main__':
     model = SVMTextcat(base_path='/cs/snapless/oabend/eitan.wagner/segmentation/').from_path()
     model.find_priors()
 
+
+    nums = get_sf_testimony_nums()
+    # r = range(112, 115)
+    r = nums[:3]
     # all_segments = {}
-    for i in range(112, 115):
+    for i in r:
         logging.info(f'\n\n\nTestimony {i}:')
-        d = Segmentor(text=get_testimony_text(i)[:], model=model)
+        # d = Segmentor(text=get_testimony_text(i)[:3000], model=model)
+        d = Segmentor(text=get_sf_testimony_text(i)[:], model=model)
         d.combine_sents(window=int(gpt2_window), ratio=float(gpt2_ratio))
 
         logging.info("\n\nFinding segments: ")
         c = d.find_segments()
         # logging.info(c)
-        assignment = d.sample_topics(num=1)[0]
-        d.find_srls(topic_assignment=assignment, count=2)
-        d.print_segments(name="outfile.txt")
+        logging.info("\n\nSampling topics: ")
+        assignment = d.sample_topics(num=4)[0]
+        # d.find_srls(topic_assignment=assignment, count=2)
+        logging.info("\n\nFinding summaries: ")
+        d.find_summaries(topic_assignment=assignment, count=4)
+        d.print_segments()
         #
         # with open('/cs/snapless/oabend/eitan.wagner/TM_clustering/temp_segments.json', "w+") as outfile:
         #     json.dump(all_segments, outfile)

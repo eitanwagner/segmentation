@@ -12,6 +12,8 @@ import json
 import pickle
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split
+from sklearn import svm
+
 import joblib
 from spacy.tokens import DocBin
 from spacy.vocab import Vocab
@@ -20,6 +22,35 @@ from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.feature_extraction.text import TfidfTransformer
 
 import parse_sf  # this should set all the extensions too
+
+
+class PartialSVM:
+    # for stacking
+    def __init__(self, feature_types="tfidf"):
+        self.model = svm.SVC(kernel='rbf', probability=True, class_weight='balanced', C=4)
+        self.feature_types = feature_types
+
+    def fit(self, X, y):
+        if self.feature_types == 'bins':
+            X = X[:, -10:]
+        elif self.feature_types == 'vectors':
+            X = X[:, -778:-10]
+        elif self.feature_types == 'ents':  # vectors and bin
+            X = X[:, -796:-778]
+        elif self.feature_types == 'tfidf':
+            X = X[:, :-796]
+        self.model.fit(X,y)
+
+    def predict_proba(self, x):
+        if self.feature_types == 'bins':
+            x = x[-10:]
+        elif self.feature_types == 'vectors':
+            x = x[:, -778:-10]
+        elif self.feature_types == 'ents':  # vectors and bin
+            x = x[-796:-778]
+        elif self.feature_types == 'tfidf':
+            x = x[:-796]
+        return self.model.predict_proba(x)
 
 
 class SVMTextcat:
@@ -36,15 +67,15 @@ class SVMTextcat:
         self.vectorizer = joblib.load(self.base_path + vectorizer_path)
 
         # self.topics = self.model.classes_  # do we need to transform this??
-        self.topics = self.vectorizer.encoder.classes_  # these are the strings
+        self.topics = self.vectorizer.encoder.classes_  # these are the strings. Is topics[0] the same is label_inverse_transform(0)??
         return self
 
     def fit(self, data_path=None, test=False):
         dataset = TextcatDataset(self.base_path + data_path, self.extra_features)
         self.vectorizer = dataset.vectorizer
         # self.model = train_svm(dataset, random_state=42, out_path=self.base_path + "models/")  # !!!
-        # if self.extra_features != 'ents_bin2':
-        if True:
+        if self.extra_features != 'ents_srls_bin2':
+        # if True:
             self.model = train_svm(dataset, random_state=42, out_path=None)  # !!!
         else:
             self.model = train_svm(dataset, random_state=42, out_path=self.base_path + 'models/')
@@ -65,9 +96,10 @@ class SVMTextcat:
         len_logp = poisson.logpmf(len(span)//8, self.prior_length//8)  # logP(s)
         return logsumexp(pred_logp + lm_logp + len_logp), pred_logp
 
+
     def predict_raw(self, text):
         # returns classifier probabilities for a plain text. without using extra features
-        x = self.vectorizer.transform(text, None)
+        x = self.vectorizer.transform([text], None)
         return np.ravel(self.model.predict_log_proba(x))
 
     def find_priors(self):
@@ -103,6 +135,12 @@ class Vectorizer:
             X = hstack((X, np.array(extra_features, dtype=float)[:, -10:]))
         elif self.use_extra_features == 'vectors':  # vectors and bin
             X = np.array(extra_features, dtype=float)[:, -778:]
+        if self.use_extra_features == 'bin_only':
+            X = np.array(extra_features, dtype=float)[:, -10:]
+        elif self.use_extra_features == 'vectors_only':
+            X = np.array(extra_features, dtype=float)[:, -778:-10]
+        elif self.use_extra_features == 'ents_only':  # vectors and bin
+            X = np.array(extra_features, dtype=float)[:, :18]
         elif self.use_extra_features == 'ents_srls_bin':  # but no vectors
             X = hstack((X, np.array(extra_features, dtype=float)[:, :-778], np.array(extra_features, dtype=float)[:, -10:]))
         elif self.use_extra_features == 'ents_bin':
@@ -127,6 +165,8 @@ class Vectorizer:
         # texts = [s.text for s in spans]
         # extra_features = [s._.feature_vectors for s in spans]  # any span should have this
         X = self.tfidf.transform(texts)
+        if extra_features is None:
+            return hstack((X, np.zeros((len(texts), 28))))
         # here we add features
         if self.use_extra_features == 'all':
             X = hstack((X, np.array(extra_features, dtype=float)))
@@ -158,9 +198,9 @@ class Vectorizer:
         self.encoder.fit(y)
         return self
 
-    def label_transform(self, y):
+    def label_transform(self, label):
         # transform string to id
-        return self.encoder.transform(y)
+        return self.encoder.transform(label)
 
     def label_inverse_transform(self, y):
         # converts a response vector back to the original label strings
@@ -171,7 +211,7 @@ class Vectorizer:
 class TextcatDataset:
     # hold the dataset and performs transforming and splitting
     def __init__(self, data_path, extra_features=None):
-        self.path = path  # this is  in data/docs/
+        self.path = data_path  # this is  in data/docs/
         # load the data
         with open(data_path + "data1.json", 'r') as infile:
             data = json.load(infile)
@@ -239,7 +279,6 @@ def train_svm(dataset, random_state=42, out_path=None):
     X_test = csr_matrix(np.nan_to_num(X_test.todense()), dtype=float)
     v = np.nan_to_num(X_train.todense()).var()
 
-    from sklearn import svm
     # clf = svm.SVC(kernel='poly', probability=True, gamma='scale', class_weight='balanced')
     # clf = svm.SVC(kernel='rbf', probability=True, gamma='scale', class_weight='balanced', C=2)
     clf = svm.SVC(kernel='rbf', probability=True, gamma=1/(2*X_train.shape[1] * v), class_weight='balanced', C=4)
@@ -264,6 +303,32 @@ def train_svm(dataset, random_state=42, out_path=None):
         joblib.dump(clf, out_path + 'svm.pkl')
         joblib.dump(dataset.vectorizer, out_path + 'vectorizer.pkl')
     return clf
+
+def ensemble():
+    from sklearn.ensemble import StackingClassifier
+    from sklearn.linear_model import LogisticRegression
+    path = '/cs/snapless/oabend/eitan.wagner/segmentation/'
+    dataset = TextcatDataset(path, extra_features="all")
+    X_train, X_test, y_train, y_test = dataset.get_splits(0.2, random_state=42)
+    X_train = csr_matrix(np.nan_to_num(X_train.todense()), dtype=float)
+    X_test = csr_matrix(np.nan_to_num(X_test.todense()), dtype=float)
+    v = np.nan_to_num(X_train.todense()).var()
+
+    estimators = [('svm1', PartialSVM(feature_types="tfidf")),
+                  ('svm2', PartialSVM(feature_types="bins")),
+                  ('svm3', PartialSVM(feature_types="ents")),
+                  ('svm4', PartialSVM(feature_types="vectors"))]
+    clf = StackingClassifier(estimators=estimators, final_estimator=LogisticRegression())
+
+    logging.info("Training ensemble")
+    clf.fit(X_train, y_train)
+
+    #Predict the response for test dataset
+    y_pred = clf.predict(X_train)
+    logging.info(f"ensemble Accuracy (train): {accuracy_score(y_train, y_pred)}")
+    y_pred = clf.predict(X_test)
+    logging.info(f"ensemble Accuracy (test): {accuracy_score(y_test, y_pred)}")
+    return
 
 
 def test_model(model, dataset, random_state=42, out_path=None):
@@ -304,36 +369,36 @@ if __name__ == "__main__":
     # logging.info("Polynomial kernel:")
     logging.info("RBF with C=4 and gamma/2")
     path = '/cs/snapless/oabend/eitan.wagner/segmentation/'
-    logging.info("\nTraining - no extra features")
-    model = SVMTextcat(base_path=path, extra_features="")
+    # logging.info("\nTraining - no extra features")
+    # model = SVMTextcat(base_path=path, extra_features="")
+    # model.fit(data_path='data/docs/')
+    # #
+    # logging.info("\nTraining - only bins in tfidf")
+    # model = SVMTextcat(base_path=path, extra_features='bin2')
+    # model.fit(data_path='data/docs/')
+    #
+    # logging.info("\nTraining - ents and bins in tfidf")
+    # model = SVMTextcat(base_path=path, extra_features='ents_bin2')
+    # model.fit(data_path='data/docs/')
+
+    # logging.info("\nTraining - ents, srls and bins in tfidf")
+    # model = SVMTextcat(base_path=path, extra_features='ents_srls_bin2')
+    # model.fit(data_path='data/docs/')
+
+    # logging.info("Training - all extra features")
+    # model = SVMTextcat(base_path=path, extra_features='all')
+    # model.fit(data_path='data/docs/')
+
+    logging.info("Training - only bin")
+    model = SVMTextcat(base_path=path, extra_features='bin_only')
     model.fit(data_path='data/docs/')
 
-    logging.info("\nTraining - only bins in tfidf")
-    model = SVMTextcat(base_path=path, extra_features='bin2')
+    logging.info("Training - only ents")
+    model = SVMTextcat(base_path=path, extra_features='ents_only')
     model.fit(data_path='data/docs/')
 
-    logging.info("\nTraining - ents and bins in tfidf")
-    model = SVMTextcat(base_path=path, extra_features='ents_bin2')
-    model.fit(data_path='data/docs/')
-
-    logging.info("\nTraining - ents, srls and bins in tfidf")
-    model = SVMTextcat(base_path=path, extra_features='ents_srls_bin2')
-    model.fit(data_path='data/docs/')
-
-    logging.info("Training - all extra features")
-    model = SVMTextcat(base_path=path, extra_features='all')
-    model.fit(data_path='data/docs/')
-
-    logging.info("Training - only vectors and bin")
-    model = SVMTextcat(base_path=path, extra_features='vectors')
-    model.fit(data_path='data/docs/')
-
-    logging.info("Training - with ents, srls and bin")
-    model = SVMTextcat(base_path=path, extra_features='ents_srls_bin')
-    model.fit(data_path='data/docs/')
-
-    logging.info("Training - with ents, and bin")
-    model = SVMTextcat(base_path=path, extra_features='ents_bin')
+    logging.info("Training - only vectors and no bin")
+    model = SVMTextcat(base_path=path, extra_features='vectors_only')
     model.fit(data_path='data/docs/')
 
 

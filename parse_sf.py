@@ -72,6 +72,43 @@ def count_topics():
 # *************************
 # get data from raw xml (but given the word2topics dictionary
 
+def get_raw_text(data_path):
+    with open(data_path + 'words2topics-new.json', 'r') as infile:
+        words2topics = json.load(infile)
+
+    data = pd.read_csv(data_path + "Martha_transcripts/index segments for 1000 English Jewish survivor interviews.csv")
+    testimonies = set(data['IntCode'])
+
+    texts = {}
+    numtapes = {}
+
+    # clean testimony list
+    for i, t in enumerate(list(testimonies)):
+        t_data = data[data['IntCode'] == t]  # data for the specific testimony
+        num_tapes = max(t_data['InTapenumber'])
+        numtapes[t] = num_tapes  # this is temporary and will be overwritten
+
+    for i, t in enumerate(testimonies):
+        num_tapes = numtapes[t]
+        words = []
+        for i in range(1, num_tapes+1):
+            try:
+                mytree = ET.parse(data_path + f'Martha_transcripts/{t}.{i}.xml')
+            except (FileNotFoundError, ParseError) as err:
+                # except:
+                continue
+            else:
+                myroot = mytree.getroot()
+                for j, r in enumerate(myroot):
+                    for k, e in enumerate(r):
+                        if e.text is not None:
+                            words.append(e.text)
+        texts[t] = " ".join(words)
+
+    with open(data_path + 'sf_raw_text.json', 'w') as outfile:
+        json.dump(texts, outfile)
+
+
 def parse_from_xml(data_path):
     with open(data_path + 'words2topics-new.json', 'r') as infile:
         words2topics = json.load(infile)
@@ -386,12 +423,14 @@ if __name__ == "__main__":
     import logging.config
     logging.config.dictConfig({'version': 1, 'disable_existing_loggers': True, })
 
-    nlp = spacy.load("en_core_web_trf")
+    # nlp = spacy.load("en_core_web_trf")
     # add_extensions()
     data_path = '/cs/snapless/oabend/eitan.wagner/segmentation/data/'
+    get_raw_text(data_path)
     # parse_from_xml(data_path)
-    parser = TestimonyParser(nlp)
-    parser.spacy_parse(data_path)
+
+    # parser = TestimonyParser(nlp)
+    # parser.spacy_parse(data_path)
     # count_topics()
 
 # different format - 19895, 20218, 20367, 20405, 20505, 20873, 20909 etc.
