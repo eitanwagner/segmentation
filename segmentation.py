@@ -10,15 +10,17 @@ import sys
 import spacy
 import logging
 from summarize import Summarizer
+import pandas as pd
 
 class Segmentor:
-    def __init__(self, text, model=None):
+    def __init__(self, i, text, model=None):
+        self.i = i
         self.segments = [0]  # list of segment starts
         self.segment_spans = []  # list of segment spacy spans
-        self.max_srls = []
+        self.max_srls = None
         self.summaries = []
         self.ps = None  # list of probabilities for the segments
-        self.topic_assignments = None  # list of sampled assignments
+        self.topic_assignments = []  # list of sampled assignments
 
         if model is not None:
             self.cats = model.topics
@@ -125,33 +127,39 @@ class Segmentor:
         # self.segments, self.ps = segments, ps
         self.segment_spans, self.ps = segment_spans, ps
         # return segments, ps
+        # logging.info("Probabilities: ")
+        # logging.info(ps)
         return segment_spans, ps
 
-    def sample_topics(self, num=3):
+    def sample_topics(self, num=3, allow_doubles=False):
         # returns random topic assignments, without doubles, for the requested amount
         def has_doubles(l):
-            for i, v in enumerate(l[1:], start=1):
-                if v == l[i-1]:
+            for i in range(1, len(l)):
+                # for i, v in enumerate(l[1:], start=1):
+                #     if v == l[i-1]:
+                if l[i] == l[i-1]:
                     return True
             return False
 
         attempts = 0
         found = 0
-        topic_assignments = []
-        while attempts < 100:
+        # topic_assignments = []
+        while attempts < 5000:
             topics = [np.random.choice(a=len(p), p=p/p.sum()) for p in self.ps]
-            if not has_doubles(topics):
+            if allow_doubles or not has_doubles(topics):
+                logging.info("Found a topic assignment")
                 found += 1
-                topic_assignments.append(topics)
+                self.topic_assignments.append(topics)
                 if found == num:
-                    self.topic_assignments = topic_assignments
-                    return topic_assignments
-        return None
+                    return self.topic_assignments
+            attempts += 1
+        return self.topic_assignments
 
     def find_srls(self, topic_assignment, count=1):
         # finds srl units for each segment, and ranks them according to the connection with the chosen topic_assignment
         # returns a list (even if count=1)
         # TODO: for now this is only used for the first topic assignment. maybe we can use the assignment distribution??
+        self.max_srls = []
         for span, topic in zip(self.segment_spans, topic_assignment):
             self.parser.srler.add_to_new_span(span)  # this was probably done already
             # srls, first_last = self.parser.srler.parse_simple(span.text)
@@ -178,7 +186,7 @@ class Segmentor:
         # for assignment in self.topic_assignments:
         for i, segment in enumerate(self.segment_spans):
             logging.info(f"************************** Segment {i}, topic: {[self.cats[assignment[i]] for assignment in self.topic_assignments]} ***********************")
-            if len(self.max_srls) > 0 and len(self.max_srls[i]) > 0:
+            if self.max_srls is not None and len(self.max_srls[i]) > 0:
                 logging.info(f"************************** srls (for first): {[srl.text for srl in self.max_srls[i]]} ***********************")
             elif len(self.summaries[i]) > 0:
                 logging.info(f"************************** summaries (for first): {[summary[1] for summary in self.summaries[i]]} ***********************")
@@ -189,6 +197,22 @@ class Segmentor:
                 f.write(segment.text)
         if name is not None:
             f.close()
+
+    def get_for_eval(self):
+        ks = np.random.choice(range(1, len(self.segment_spans)-1, 2), size=5, replace=False)
+        texts = []
+        topics = []
+        summaries = []
+        for k in ks:
+            text1 = "\n".join([s.text.strip() for s in self.segment_spans[k-1].as_doc().sents])
+            text2 = "\n".join([s.text.strip() for s in self.segment_spans[k].as_doc().sents])
+            text3 = "\n".join([s.text.strip() for s in self.segment_spans[k+1].as_doc().sents])
+            texts.append("\n************\n".join([text1,text2,text3]))
+            topics.append([self.cats[ta[k]] for ta in self.topic_assignments])
+            summaries.append([s[1] for s in self.summaries[k]])
+        df = pd.DataFrame({"testimony": self.i, "index": ks, "texts": texts, "topics": topics,
+                           "summaries": summaries})
+        return df
 
 
 def get_testimony_sents(i, data_path='/cs/snapless/oabend/eitan.wagner/segmentation/data/'):
@@ -211,8 +235,14 @@ def get_sf_testimony_nums(data_path='/cs/snapless/oabend/eitan.wagner/segmentati
         nums = list(json.load(infile).keys())
     return nums
 
+def get_testimony_nums(data_path='/cs/snapless/oabend/eitan.wagner/segmentation/data/'):
+    with open(data_path + 'raw_text.json', 'r') as infile:
+        nums = list(json.load(infile).keys())
+    return nums
+
 
 if __name__ == '__main__':
+
     logging.basicConfig(level=logging.INFO)
     import logging.config
     logging.config.dictConfig({'version': 1, 'disable_existing_loggers': True, })
@@ -236,26 +266,33 @@ if __name__ == '__main__':
     model.find_priors()
 
 
-    nums = get_sf_testimony_nums()
+    # nums = get_sf_testimony_nums()
+    nums = get_testimony_nums()
     # r = range(112, 115)
-    r = nums[:3]
+    r = nums[5:15]
     # all_segments = {}
+    dfs = []
     for i in r:
         logging.info(f'\n\n\nTestimony {i}:')
-        # d = Segmentor(text=get_testimony_text(i)[:3000], model=model)
-        d = Segmentor(text=get_sf_testimony_text(i)[:], model=model)
+        d = Segmentor(i=i,text=get_testimony_text(i)[:], model=model)
+        # d = Segmentor(text=get_sf_testimony_text(i)[:], model=model)
         d.combine_sents(window=int(gpt2_window), ratio=float(gpt2_ratio))
 
-        logging.info("\n\nFinding segments: ")
+        logging.info("\nFinding segments: ")
         c = d.find_segments()
         # logging.info(c)
-        logging.info("\n\nSampling topics: ")
-        assignment = d.sample_topics(num=4)[0]
+        logging.info("\nSampling topics: ")
+        assignment = d.sample_topics(num=4, allow_doubles=False)[0]  # it seems it's hard to find one sometimes!!
+        # assignment = d.sample_topics(num=4, allow_doubles=True)[0]  # it seems it's hard to find one sometimes!!
         # d.find_srls(topic_assignment=assignment, count=2)
-        logging.info("\n\nFinding summaries: ")
+        logging.info("\nFinding summaries: ")
         d.find_summaries(topic_assignment=assignment, count=4)
         d.print_segments()
+
+        dfs.append(d.get_for_eval())
         #
         # with open('/cs/snapless/oabend/eitan.wagner/TM_clustering/temp_segments.json', "w+") as outfile:
         #     json.dump(all_segments, outfile)
         #
+    df = pd.concat(dfs)
+    df.to_csv('/cs/snapless/oabend/eitan.wagner/segmentation/scripts/for_eval1.csv')

@@ -21,8 +21,9 @@ Span.set_extension("real_topic", default=None, force=True)  # type String
 span_extensions = ["bin"]  # for removing
 token_extensions = ["segment"]
 
-# VECTOR_LEN = 100
-VECTOR_LEN = 768
+# VECTOR_LEN = 768
+MEAN = True
+CR, SRL = True, True
 
 def add_extensions():
     for ext in span_extensions:
@@ -239,6 +240,13 @@ class TestimonyParser:
     # Define a method that takes a Span as input and returns the Transformer
     # output.
     def span_vector(self, span):
+        # if mean then returns mean. otherwise it concatenates the first and last
+        if not MEAN:
+            # these are numpy arrays, not pytorch tensors
+            tensor1 = span.doc._.trf_data.tensors[0][0]
+            tensor2 = span.doc._.trf_data.tensors[0][-1]
+            return np.concatenate((tensor1, tensor2), axis=None)
+
         # Get alignment information for Span. This is achieved by using
         # the 'doc' attribute of Span that refers to the Doc that contains
         # this Span. We then use the 'start' and 'end' attributes of a Span
@@ -293,43 +301,27 @@ class TestimonyParser:
         for ent in segment.ents:
             ent_counts[labels.index(ent.label_)] += 1
 
-        # add span vector and sentiment
-        # vec = np.zeros(VECTOR_LEN)
-        # if segment.has_vector:
-        #     vec[:len(segment.vector[:VECTOR_LEN])] = segment.vector[:VECTOR_LEN]
-        #     logging.info(vec)
-        # else:
-        #     # vec = np.zeros(VECTOR_LEN)
-        #     logging.warning("No vector")
         vec = self.span_vector(segment)
-        # if segment._.srls is None or len(segment._.srls) == 0:  # for a new segment. Separate!!
-        #     verbs = self.srler.verbs
-        #     if doc.spans.get("segments", None) is None:
-        #         bin = 0
-        #     else:
-        #         # bin = int((10 * i) / len(doc.spans["segments"]))
-        #         bin = i
-        #     verb_counts, arg0_counts, arg1_counts = np.zeros(len(verbs)), np.zeros(50), np.zeros(50)
-        #     return list(np.concatenate((ent_counts, verb_counts, arg0_counts, arg1_counts, bin, vec), axis=None))
-
-        # logging.info(vec)
-        # sentiment = segment.sentiment
 
         # make srl features
         # this is for making the whole testimony from segments
-        verbs = self.srler.verbs
-        verb_counts, arg0_counts, arg1_counts = np.zeros(len(verbs)), np.zeros(50), np.zeros(50)
-        for srl in segment._.srls:
-            if srl._.verb and srl._.verb._.verb_id:  # this should always be true
-                verb_counts[srl._.verb._.verb_id] += 1
-            if srl._.arg0 and srl._.arg0._.arg0_id:
-                arg0_counts[srl._.arg0._.arg0_id] += 1
-            if srl._.arg1 and srl._.arg1._.arg1_id:
-                arg1_counts[srl._.arg1._.arg1_id] += 1
+        if SRL:
+            verbs = self.srler.verbs
+            verb_counts, arg0_counts, arg1_counts = np.zeros(len(verbs)), np.zeros(50), np.zeros(50)
+            for srl in segment._.srls:
+                if srl._.verb and srl._.verb._.verb_id:  # this should always be true
+                    verb_counts[srl._.verb._.verb_id] += 1
+                if srl._.arg0 and srl._.arg0._.arg0_id:
+                    arg0_counts[srl._.arg0._.arg0_id] += 1
+                if srl._.arg1 and srl._.arg1._.arg1_id:
+                    arg1_counts[srl._.arg1._.arg1_id] += 1
+        else:
+            arg0_counts, arg1_counts, verb_counts = [], [], []
 
         bin = int((10 * i) / len(doc.spans["segments"]))
         bin_vec = np.zeros(10)
         bin_vec[bin] = 1
+
         logging.info(f"Lengths (ent, srls, vec, bin): {len(ent_counts)}, {len(verb_counts)+len(arg0_counts)+ len(arg1_counts)}, {len(vec)}, {len(bin_vec)}")
         #  INFO: root:Lengths(ent, srls, ( and len_bin = 1) vec: 18, 3357, 1, 768  # changed!!
         #  INFO: root:Lengths(ent, srls, ( and len_bin = 1) vec: 18, 3357, 768, 10  # new!!
@@ -360,12 +352,16 @@ class TestimonyParser:
                 t._.segment = s
 
         # do coreference resolution
-        logging.info("Making CR...")
-        self.referencer.add_to_Doc(doc, *self.referencer.get_cr(doc.text))
+        if CR:
+            logging.info("Making CR...")
+            self.referencer.add_to_Doc(doc, *self.referencer.get_cr(doc.text))
         # do srl
-        logging.info("Making srls...")
+        if SRL:
+            logging.info("Making srls...")
+            for i, s in enumerate(doc.spans["segments"]):
+                self.srler.add_to_Span(s, self.srler.parse(s.text))
+
         for i, s in enumerate(doc.spans["segments"]):
-            self.srler.add_to_Span(s, self.srler.parse(s.text))
             s._.feature_vector = self.make_features(s, i)
             if labels:
                 s._.real_topic = labels[i]
@@ -410,7 +406,7 @@ class TestimonyParser:
 
         # docs = list(docs.values())
         # doc_bin = DocBin(docs=docs, store_user_data=True)
-        logging.info("Created data")
+        logging.info("Created data - data2")
         return
 
     def get_lists(self, doc):
@@ -423,14 +419,16 @@ if __name__ == "__main__":
     import logging.config
     logging.config.dictConfig({'version': 1, 'disable_existing_loggers': True, })
 
-    # nlp = spacy.load("en_core_web_trf")
-    # add_extensions()
+    nlp = spacy.load("en_core_web_trf")
+    add_extensions()
     data_path = '/cs/snapless/oabend/eitan.wagner/segmentation/data/'
-    get_raw_text(data_path)
+    
+    # get_raw_text(data_path)
     # parse_from_xml(data_path)
 
-    # parser = TestimonyParser(nlp)
-    # parser.spacy_parse(data_path)
+    MEAN, CR, SRL = False, False, False
+    parser = TestimonyParser(nlp)
+    parser.spacy_parse(data_path)
     # count_topics()
 
 # different format - 19895, 20218, 20367, 20405, 20505, 20873, 20909 etc.

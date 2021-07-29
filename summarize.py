@@ -105,15 +105,19 @@ class Summarizer:
         else:
             return []
 
+    def make_sents_simple(self, doc):
+        return [s.text for s in doc.sents]
 
 
     def get_ranked_sents(self, doc, max_depth, class_num):
         # returns a list of tuples tuples (log_prob,text)
         self.add_depth(doc)
-        new_sents = self.make_sents(doc, max_depth)
+        # new_sents = self.make_sents(doc, max_depth)
+        new_sents = self.make_sents_simple(doc)
         if len(new_sents) == 0:
             return [(1, "")]
         # print(new_sents)
-        log_probs = self.sents_score(new_sents, class_num)
+        # log_probs = self.sents_score(new_sents, class_num)
+        log_probs = [self.sents_score(n_s, class_num)[0] for n_s in new_sents]
 
         return sorted(list(zip(log_probs, new_sents)), reverse=True)

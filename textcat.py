@@ -6,6 +6,8 @@ from scipy.stats import poisson
 from scipy.sparse import hstack
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import accuracy_score
+from sklearn.base import BaseEstimator
+from sklearn.base import ClassifierMixin
 
 import logging
 import json
@@ -13,6 +15,9 @@ import pickle
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split
 from sklearn import svm
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MaxAbsScaler
 
 import joblib
 from spacy.tokens import DocBin
@@ -24,33 +29,37 @@ from sklearn.feature_extraction.text import TfidfTransformer
 import parse_sf  # this should set all the extensions too
 
 
-class PartialSVM:
+class PartialSVM(SVC):
     # for stacking
-    def __init__(self, feature_types="tfidf"):
-        self.model = svm.SVC(kernel='rbf', probability=True, class_weight='balanced', C=4)
+    def __init__(self, feature_types="tfidf", probability=True, class_weight='balanced', C=4):
+        super().__init__(probability=probability, class_weight=class_weight, C=C)
+        # self.model = svm.SVC(kernel='rbf', probability=True, class_weight='balanced', C=4)
         self.feature_types = feature_types
 
-    def fit(self, X, y):
+    def _transform(self, X):
         if self.feature_types == 'bins':
             X = X[:, -10:]
         elif self.feature_types == 'vectors':
             X = X[:, -778:-10]
         elif self.feature_types == 'ents':  # vectors and bin
-            X = X[:, -796:-778]
+            # X = X[:, -796:-778]
+            X = X[:, -4171:-4153]  # !!!!
         elif self.feature_types == 'tfidf':
-            X = X[:, :-796]
-        self.model.fit(X,y)
+            X = X[:, :-4171] # !!!!!
+        return X
 
-    def predict_proba(self, x):
-        if self.feature_types == 'bins':
-            x = x[-10:]
-        elif self.feature_types == 'vectors':
-            x = x[:, -778:-10]
-        elif self.feature_types == 'ents':  # vectors and bin
-            x = x[-796:-778]
-        elif self.feature_types == 'tfidf':
-            x = x[:-796]
-        return self.model.predict_proba(x)
+    def fit(self, X, y):
+        super().fit(self._transform(X), y)
+        # self.model.fit(X,y)
+
+    def predict_proba(self, X):
+        # X is two dimensional!!
+        return super().predict_proba(self._transform(X))
+        # return self.model.predict_proba(X)
+
+    def predict(self, X):
+        return np.argmax(self.predict_proba(X))
+
 
 
 class SVMTextcat:
@@ -124,13 +133,20 @@ class Vectorizer:
 
         self.vectorizer = CountVectorizer()
         self.tfidf_transformer = TfidfTransformer()
+        self.std_scaler = StandardScaler()
+        self.max_scaler = MaxAbsScaler()
 
     def fit_transform(self, texts, extra_features):
         # texts = [s.text for s in spans]
         # extra_features = [s._.feature_vectors for s in spans]  # any span should have this
+        # this does not use scaling!!!
+
         X = self.tfidf.fit_transform(texts).astype(dtype=float)
         if self.use_extra_features == 'all':
-            X = hstack((X, np.array(extra_features, dtype=float)))
+            # only here we will scale all data
+            vecs = self.std_scaler.fit_transform(np.array(extra_features, dtype=float)[:, -778:-10])
+            ents_srls = self.max_scaler.fit_transform(np.array(extra_features, dtype=float)[:, :-778])
+            X = hstack((X, ents_srls, vecs, np.array(extra_features, dtype=float)[:, -10:]))
         elif self.use_extra_features == 'bins':
             X = hstack((X, np.array(extra_features, dtype=float)[:, -10:]))
         elif self.use_extra_features == 'vectors':  # vectors and bin
@@ -169,7 +185,10 @@ class Vectorizer:
             return hstack((X, np.zeros((len(texts), 28))))
         # here we add features
         if self.use_extra_features == 'all':
-            X = hstack((X, np.array(extra_features, dtype=float)))
+            # only here we will scale all data
+            vecs = self.std_scaler.transform(np.array(extra_features, dtype=float)[:, -778:-10])
+            ents_srls = self.max_scaler.transform(np.array(extra_features, dtype=float)[:, :-778])
+            X = hstack((X, ents_srls, vecs, np.array(extra_features, dtype=float)[:, -10:]))
         elif self.use_extra_features == 'bins':
             X = hstack((X, np.array(extra_features, dtype=float)[:, -10:]))
         elif self.use_extra_features == 'vectors':  # vectors and bin
@@ -304,23 +323,22 @@ def train_svm(dataset, random_state=42, out_path=None):
         joblib.dump(dataset.vectorizer, out_path + 'vectorizer.pkl')
     return clf
 
-def ensemble():
+def ensemble(path = '/cs/snapless/oabend/eitan.wagner/segmentation/data/docs/'):
     from sklearn.ensemble import StackingClassifier
     from sklearn.linear_model import LogisticRegression
-    path = '/cs/snapless/oabend/eitan.wagner/segmentation/'
     dataset = TextcatDataset(path, extra_features="all")
     X_train, X_test, y_train, y_test = dataset.get_splits(0.2, random_state=42)
     X_train = csr_matrix(np.nan_to_num(X_train.todense()), dtype=float)
     X_test = csr_matrix(np.nan_to_num(X_test.todense()), dtype=float)
-    v = np.nan_to_num(X_train.todense()).var()
 
     estimators = [('svm1', PartialSVM(feature_types="tfidf")),
                   ('svm2', PartialSVM(feature_types="bins")),
                   ('svm3', PartialSVM(feature_types="ents")),
                   ('svm4', PartialSVM(feature_types="vectors"))]
-    clf = StackingClassifier(estimators=estimators, final_estimator=LogisticRegression())
+    clf = StackingClassifier(estimators=estimators,
+                             final_estimator=LogisticRegression(max_iter=300, solver='saga'))
 
-    logging.info("Training ensemble")
+    logging.info("Training ensemble - saga")
     clf.fit(X_train, y_train)
 
     #Predict the response for test dataset
@@ -369,6 +387,7 @@ if __name__ == "__main__":
     # logging.info("Polynomial kernel:")
     logging.info("RBF with C=4 and gamma/2")
     path = '/cs/snapless/oabend/eitan.wagner/segmentation/'
+    ensemble()
     # logging.info("\nTraining - no extra features")
     # model = SVMTextcat(base_path=path, extra_features="")
     # model.fit(data_path='data/docs/')
@@ -388,18 +407,18 @@ if __name__ == "__main__":
     # logging.info("Training - all extra features")
     # model = SVMTextcat(base_path=path, extra_features='all')
     # model.fit(data_path='data/docs/')
-
-    logging.info("Training - only bin")
-    model = SVMTextcat(base_path=path, extra_features='bin_only')
-    model.fit(data_path='data/docs/')
-
-    logging.info("Training - only ents")
-    model = SVMTextcat(base_path=path, extra_features='ents_only')
-    model.fit(data_path='data/docs/')
-
-    logging.info("Training - only vectors and no bin")
-    model = SVMTextcat(base_path=path, extra_features='vectors_only')
-    model.fit(data_path='data/docs/')
+    #
+    # logging.info("Training - only bin")
+    # model = SVMTextcat(base_path=path, extra_features='bin_only')
+    # model.fit(data_path='data/docs/')
+    #
+    # logging.info("Training - only ents")
+    # model = SVMTextcat(base_path=path, extra_features='ents_only')
+    # model.fit(data_path='data/docs/')
+    #
+    # logging.info("Training - only vectors and no bin")
+    # model = SVMTextcat(base_path=path, extra_features='vectors_only')
+    # model.fit(data_path='data/docs/')
 
 
     #
